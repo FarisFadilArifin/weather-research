@@ -29,6 +29,8 @@ def _notebook(station_id: str) -> dict:
 Wide 3-provider same-day 11am notebook for `{station_id}`.
 
 Set `FAST_MODE = False` after the provider pulls are complete to run the fuller walk-forward experiment.
+
+This is the current ML workflow: it predicts `actual_high_f` directly from same-day 11am provider, observation, calendar, and lagged-history features.
 """,
             ),
             _cell(
@@ -60,9 +62,30 @@ from src.calibration.station_stacking import (
     STACK_METHOD,
     StationStackingConfig,
     build_station_wide_dataset,
+    missing_expected_model_methods,
+    missing_model_dependencies,
     provider_availability,
     run_station_stacking_experiment,
 )
+""",
+            ),
+            _cell(
+                "markdown",
+                """## ML Dependency Check
+
+The expected station-stacking output includes XGBoost, LightGBM, CatBoost, and the Ridge stack. This check fails early when the environment can only produce raw baselines.
+""",
+            ),
+            _cell(
+                "code",
+                """missing_packages = missing_model_dependencies()
+if missing_packages:
+    raise ImportError(
+        "Missing station-stacking ML packages: "
+        + ", ".join(missing_packages)
+        + ". Install them with: python -m pip install -r requirements.txt"
+    )
+missing_packages
 """,
             ),
             _cell(
@@ -148,6 +171,13 @@ Raw provider baselines are evaluated first. XGBoost, LightGBM, and CatBoost are 
     fast_mode=FAST_MODE,
 )
 result = run_station_stacking_experiment(config)
+missing_methods = missing_expected_model_methods(result.metrics)
+if missing_methods:
+    raise RuntimeError(
+        "Station-stacking output is incomplete. Missing methods: "
+        + ", ".join(missing_methods)
+        + ". Check complete provider overlap and ML dependencies before trusting saved metrics."
+    )
 result.metrics
 """,
             ),

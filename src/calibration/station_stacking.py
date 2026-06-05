@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+from importlib.util import find_spec
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -134,6 +135,11 @@ BASELINE_METHODS = [
 ]
 BASE_MODEL_METHODS = ["xgboost", "lightgbm", "catboost"]
 STACK_METHOD = "ridge_stack"
+REQUIRED_MODEL_PACKAGES = {
+    "xgboost": "xgboost",
+    "lightgbm": "lightgbm",
+    "catboost": "catboost",
+}
 
 
 @dataclass(frozen=True)
@@ -179,6 +185,27 @@ class StationStackingResult:
     metrics: pd.DataFrame
     feature_columns: pd.DataFrame
     output_paths: dict[str, Path]
+
+
+def missing_model_dependencies() -> list[str]:
+    return sorted(package for package, module in REQUIRED_MODEL_PACKAGES.items() if find_spec(module) is None)
+
+
+def require_model_dependencies() -> None:
+    missing = missing_model_dependencies()
+    if missing:
+        missing_list = ", ".join(missing)
+        raise ImportError(
+            "Station stacking ML requires xgboost, lightgbm, and catboost. "
+            f"Missing: {missing_list}. Install them with: python -m pip install -r requirements.txt"
+        )
+
+
+def missing_expected_model_methods(metrics: pd.DataFrame) -> list[str]:
+    if metrics.empty or "method" not in metrics:
+        return [*BASE_MODEL_METHODS, STACK_METHOD]
+    methods = set(metrics["method"].dropna().astype(str))
+    return [method for method in [*BASE_MODEL_METHODS, STACK_METHOD] if method not in methods]
 
 
 def provider_availability(
@@ -904,6 +931,7 @@ def _build_base_model_pipelines(
     categorical: list[str],
     numeric: list[str],
 ) -> dict[str, Any]:
+    require_model_dependencies()
     try:
         from catboost import CatBoostRegressor
         from lightgbm import LGBMRegressor
@@ -913,10 +941,7 @@ def _build_base_model_pipelines(
         from sklearn.preprocessing import OneHotEncoder
         from xgboost import XGBRegressor
     except ImportError as exc:
-        raise ImportError(
-            "Station stacking notebooks need xgboost, lightgbm, and catboost. "
-            "Install them with: python -m pip install -r requirements.txt"
-        ) from exc
+        raise ImportError("Station stacking notebooks need scikit-learn and the gradient boosting packages.") from exc
 
     n_estimators = 80 if config.fast_mode else 450
     cat_iterations = 80 if config.fast_mode else 450

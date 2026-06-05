@@ -15,6 +15,7 @@ from src.calibration.station_stacking import (
     feature_columns,
     load_current_observation_features,
     load_same_day_provider_forecasts,
+    missing_expected_model_methods,
     provider_availability,
     raw_baseline_predictions,
 )
@@ -233,6 +234,19 @@ def test_provider_availability_and_raw_baselines(tmp_path, monkeypatch) -> None:
         set(predictions["method"])
     )
     assert predictions.loc[predictions["method"].eq("best_raw_provider"), "contract_date"].min() == "2026-01-03"
+
+
+def test_missing_expected_model_methods_flags_baseline_only_metrics() -> None:
+    metrics = pd.DataFrame(
+        {
+            "method": ["gfs_raw", "hrrr_raw", "provider_mean", "provider_median"],
+            "mae_f": [1.0, 1.1, 0.9, 0.9],
+        }
+    )
+
+    missing = missing_expected_model_methods(metrics)
+
+    assert missing == ["xgboost", "lightgbm", "catboost", "ridge_stack"]
 
 
 def test_forecast_at_as_of_columns_are_not_calibration_features() -> None:
