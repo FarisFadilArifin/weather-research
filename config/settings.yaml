@@ -1,0 +1,73 @@
+project:
+  data_dir: data
+  raw_dir: data/raw
+  processed_dir: data/processed
+  output_dir: data/outputs
+  plots_dir: data/outputs/plots
+
+polymarket:
+  gamma_base_url: https://gamma-api.polymarket.com
+  weather_tag_id: 84
+  search_terms:
+    - highest temperature
+    - daily high temperature
+    - temperature in
+    - high temperature
+  page_limit: 100
+
+providers:
+  default:
+    - hrrr
+    - openmeteo
+    - nws
+    - actuals
+  horizons_hours:
+    - 72
+    - 48
+    - 36
+    - 24
+    - 12
+    - 6
+    - 0
+  publication_lag_minutes:
+    hrrr: 75
+    openmeteo: 60
+    nws: 30
+
+actuals:
+  aviationweather_stationinfo_url: https://aviationweather.gov/api/data/stationinfo
+  aviationweather_metar_url: https://aviationweather.gov/api/data/metar
+  iem_asos_1min_url: https://mesonet.agron.iastate.edu/cgi-bin/request/asos1min.py
+  iem_asos_hourly_url: https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py
+
+openmeteo:
+  historical_forecast_url: https://historical-forecast-api.open-meteo.com/v1/forecast
+  forecast_url: https://api.open-meteo.com/v1/forecast
+
+hrrr:
+  aws_base_url: https://noaa-hrrr-bdp-pds.s3.amazonaws.com
+  product: wrfsfc
+  domain: conus
+  max_forecast_hour: 48
+  max_cycle_search_hours: 18
+  min_target_day_coverage_hours: 18
+
+nws:
+  points_url: https://api.weather.gov/points/{lat},{lon}
+  user_agent: weather-research/0.1 contact@example.com
+  nbm_aws_base_url: https://noaa-nbm-grib2-pds.s3.amazonaws.com
+  nbm_domain_suffix: co
+  nbm_product: core
+  nbm_temperature_variable: TMAX
+  nbm_allowed_cycle_hours: [0, 6, 12, 18]
+  nbm_max_forecast_hour: 72
+  nbm_max_cycle_search_hours: 12
+  nbm_download_retries: 4
+  nbm_retry_backoff_seconds: 10
+  nbm_abort_on_network_error: true
+
+trading:
+  min_sample_size: 20
+  high_error_std_f: 5.0
+  strong_score_threshold: 0.5
+  possible_score_threshold: 0.25

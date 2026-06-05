@@ -1,0 +1,128 @@
+# Current Observation Feature Pull
+
+This file defines the actual observed conditions to pull at the 11 AM forecast snapshot.
+
+These are not forecast features. They are actual station observations available at or before 11:00 AM local time on the contract date.
+
+## Scope
+
+- Stations: `KATL`, `KAUS`, `KORD`, `KDAL`, `KHOU`, `KLAX`, `KMIA`, `KLGA`, `KSEA`
+- Observation snapshot: 11:00 AM local station time
+- Observation selection rule: use the latest observation with timestamp `<= 11:00 AM local`
+- Staleness tracking: always record the exact observation time and age in minutes
+
+## Leakage Contract
+
+- Observation timestamp must be `<= 11:00 AM local`.
+- Do not use observations after 11 AM.
+- Do not use `actual_high_f` or any same-day final actual-derived summary as an input feature.
+- Daily high target remains `actual_high_f`.
+- These features are operationally valid only because they would have been known at the 11 AM decision time.
+
+## Source Rule
+
+Preferred source:
+
+- Mostly Right SDK timestamped station observations.
+
+Implemented SDK path:
+
+- `mostlyright.weather.obs.obs()` is still useful for daily observation aggregates.
+- For current-observation features, the project uses the SDK's raw observation fetch path so each row keeps an `observed_at` timestamp and raw METAR-derived fields.
+- The cache is SDK-only and records `observed_data_source=mostlyright_sdk_raw_observations`.
+
+Fallback source, only if approved:
+
+- IEM/ASOS/METAR station observations.
+
+Do not silently mix in outside observations unless the research direction explicitly allows it.
+
+## Feature Columns
+
+| Feature | Unit | Meaning | Priority |
+|---|---:|---|---|
+| `observed_temp_at_as_of_f` | deg F | Actual observed temperature at or before 11 AM local | required |
+| `observed_dewpoint_at_as_of_f` | deg F | Actual observed dew point at or before 11 AM local | required |
+| `observed_humidity_at_as_of` | percent | Actual relative humidity at or before 11 AM local | required if available or derivable |
+| `observed_wind_speed_at_as_of` | mph | Actual wind speed at or before 11 AM local | required |
+| `observed_wind_direction_at_as_of` | degrees | Actual wind direction at or before 11 AM local | required |
+| `observed_wind_gust_at_as_of` | mph | Actual gust at or before 11 AM local | optional, station-dependent |
+| `observed_pressure_at_as_of` | hPa or inHg | Actual pressure at or before 11 AM local | useful |
+| `observed_pressure_source` | text | Whether pressure came from sea-level pressure or altimeter conversion | useful |
+| `observed_altimeter_inhg_at_as_of` | inHg | Raw altimeter setting at or before 11 AM local | useful |
+| `observed_sea_level_pressure_mb_at_as_of` | mb/hPa | Raw sea-level pressure at or before 11 AM local | useful |
+| `observed_visibility_at_as_of` | miles | Actual visibility at or before 11 AM local | useful |
+| `observed_ceiling_at_as_of` | ft | Lowest broken/overcast ceiling at or before 11 AM local | useful |
+| `observed_cloud_cover_at_as_of` | category or percent | Actual cloud cover derived from METAR cloud layers | useful |
+| `observed_weather_code_at_as_of` | text/category | Present-weather code such as rain, fog, thunder, mist | useful |
+| `observed_precip_recent_at_as_of` | inches or mm | Recent observed precipitation, if reported | optional, sparse |
+| `observed_snow_depth_at_as_of` | inches | Snow depth at or before 11 AM local, if reported | optional, sparse |
+| `observed_as_of_time_local` | timestamp | Local timestamp of the observation used | required |
+| `observed_as_of_time_utc` | timestamp | UTC timestamp of the observation used | required |
+| `observed_as_of_age_minutes` | minutes | Minutes between 11 AM local and the observation used | required |
+| `observed_source` | text | Observation source lineage | required |
+| `observed_observation_type` | text | Raw observation type, usually METAR/SPECI where reported | useful |
+| `observed_qc_field` | text | Raw SDK QC field, if provided | useful |
+| `observed_raw_metar` | text | Raw METAR string used for the selected observation | useful for audit |
+| `observed_data_source` | text | Project data-source lineage, currently `mostlyright_sdk_raw_observations` | required |
+| `observed_fetch_status` | text | `ok` or `unavailable` | required |
+| `observed_unavailable_reason` | text | Reason observation features could not be fetched | required when unavailable |
+
+## Derived Observation Features
+
+These can be computed after the raw current-observation fields exist:
+
+| Feature | Meaning |
+|---|---|
+| `observed_dewpoint_depression_f` | `observed_temp_at_as_of_f - observed_dewpoint_at_as_of_f` |
+| `observed_heat_index_at_as_of_f` | Heat index from observed temp and humidity, when warm enough |
+| `observed_wind_chill_at_as_of_f` | Wind chill from observed temp and wind, when cold enough |
+| `observed_wind_dir_sin` | Circular encoding of observed wind direction |
+| `observed_wind_dir_cos` | Circular encoding of observed wind direction |
+| `observed_is_raining_at_as_of` | Derived from present-weather code or recent precip |
+| `observed_is_fog_or_mist_at_as_of` | Derived from present-weather code and/or visibility |
+| `observed_is_thunder_at_as_of` | Derived from present-weather code |
+
+## Planned Cache
+
+Current cache file:
+
+```text
+data/calibration/sdk_current_obs_2021_2026/sdk_current_observations_11am.csv
+```
+
+Recommended key:
+
+```text
+station_id, contract_date, timing_mode
+```
+
+For this project, `timing_mode` should be:
+
+```text
+same_day_11am
+```
+
+Rows are checkpointed and resumable. Transient SDK/network failures are left pending for a future resume; true unavailable station/date rows are written as `unavailable` and can be retried intentionally with `--retry-unavailable`.
+
+Recommended command:
+
+```powershell
+python -m src.backfill_mostlyright_current_observations --sdk-cache-dir data/calibration/sdk_current_obs_2021_2026 --stations $stations --start-date 2021-01-01 --end-date latest-complete --chunk-days 31 --retry-unavailable --request-retries 5 --retry-sleep-seconds 90 --sleep-between-chunks 8
+```
+
+## Modeling Use
+
+These columns may be used as ML features because they are known at 11 AM. They should be shared across all providers for the same station/date, then joined onto each provider row in the calibration dataset.
+
+They must not replace the target:
+
+```text
+calibration_bias_f = actual_high_f - raw_forecast_high_f
+```
+
+Calibration remains additive:
+
+```text
+calibrated_high_f = raw_forecast_high_f + predicted_calibration_bias_f
+```

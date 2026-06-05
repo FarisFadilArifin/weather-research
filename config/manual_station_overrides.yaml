@@ -1,0 +1,17 @@
+# Manual station overrides are intentionally empty by default.
+# Add entries only when Polymarket rules identify a source/station that the parser
+# cannot confidently resolve on its own. Do not use this as a manually chosen city list.
+#
+# Example:
+# overrides:
+#   - market_slug: highest-temperature-in-example-city-on-june-1-2026
+#     station_code: KABC
+#     station_name: Example Airport Station
+#     airport_name: Example International Airport
+#     lat: 40.0
+#     lon: -75.0
+#     timezone: America/New_York
+#     country: US
+#     mapping_confidence: 0.95
+#     resolution_source_text: "Recorded at the Example Airport Station..."
+overrides: []
