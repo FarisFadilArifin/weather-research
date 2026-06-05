@@ -1,6 +1,6 @@
 # Weather Forecast Calibration Research
 
-Calibration-first Python research project for daily high-temperature forecast markets.
+Python research pipeline for daily high-temperature forecast markets. The current direction is a same-day 11 AM station-stacking workflow that combines GFS, HRRR, direct NOAA NBM, current station observations, calendar features, and lagged history.
 
 The observed target variable is the final station daily high:
 
@@ -15,20 +15,72 @@ calibration_bias_f = actual_high_f - raw_forecast_high_f
 calibrated_forecast_high_f = raw_forecast_high_f + predicted_calibration_bias_f
 ```
 
-In the station-stacking workflow, the models predict `actual_high_f` directly from provider forecasts, current 11 AM observations, calendar features, and lagged history. In the bias-calibration workflow, models and rules predict `calibration_bias_f` as an additive correction to the raw forecast.
+In the station-stacking workflow, models predict `actual_high_f` directly. In the conservative bias-calibration workflow, rules and comparison models predict `calibration_bias_f` as an additive correction.
 
-The current research horizon is `0h`, defined as the forecast available at `06:00` local station time on the contract date.
+## Current Workflow
 
-## Provider Labels
+The main research workflow is:
+
+- Timing mode: `same_day_11am`
+- Forecast snapshot: 11:00 AM local station time
+- Forecast window: valid times from 11:00 AM local through the end of the local day
+- Target forecast: max forecast temperature over that remaining-day window
+- Target variable: final observed station high, `actual_high_f`
+
+Primary station-stacking models:
+
+- `xgboost`
+- `lightgbm`
+- `catboost`
+- optional `ridge_stack` meta-model
+
+The older `0h` / 06:00 local calibration report path still exists as a conservative benchmark, especially for `hierarchical_shrinkage`, but it is not the current main station-stacking direction.
+
+## Providers
 
 Provider labels are source-truthful:
 
 - `gfs`: Mostly Right `forecast_nwp(model="gfs")`
 - `hrrr`: Mostly Right `forecast_nwp(model="hrrr")`
-- `nbm`: archived NOAA NBM/TMAX data, including legacy rows previously stored in `nws_forecast_snapshots.csv`
-- `nws`: exact captured weather.gov/NWS forecasts only
+- `nbm`: direct NOAA NBM archive GRIB2 extraction
+- `nws`: exact captured weather.gov/NWS forecasts only, if local capture files exist
 
-Do not treat NBM, MOS, Open-Meteo, or any other proxy as exact `nws`.
+Do not label NBM, MOS, Open-Meteo, or other proxies as exact `nws`.
+
+## Stations
+
+Current research stations:
+
+- `KATL`: Atlanta/Hartsfield-Jackson Intl
+- `KAUS`: Austin/Bergstrom Intl
+- `KDAL`: Dallas/Love Field
+- `KHOU`: Houston/Hobby Airport
+- `KLAX`: Los Angeles Intl
+- `KLGA`: New York/La Guardia Airport
+- `KMIA`: Miami Intl
+- `KORD`: Chicago/O'Hare Intl
+- `KSEA`: Seattle-Tacoma Intl
+
+Use the resolved airport station code, not only a city name from a market title.
+
+## Feature Rules
+
+Forecast features must be available from the selected model cycle and valid times known at the 11 AM snapshot. Do not use observed final highs, post-11 AM observations, or same-day final actual-derived summaries as forecast features.
+
+Current-observation features are allowed only when the observation timestamp is at or before 11:00 AM local. These include fields such as observed temperature, dew point, humidity, wind, pressure, visibility, ceiling, cloud cover, weather code, raw METAR lineage, and observation age.
+
+Derived 11 AM observation features include:
+
+- `observed_dewpoint_depression_f`
+- `observed_heat_index_at_as_of_f`
+- `observed_wind_chill_at_as_of_f`
+- `observed_wind_dir_sin`
+- `observed_wind_dir_cos`
+- `observed_is_raining_at_as_of`
+- `observed_is_fog_or_mist_at_as_of`
+- `observed_is_thunder_at_as_of`
+
+Audit fields such as raw METAR, observation timestamps, source text, and unavailable reasons are kept for lineage but should not be treated as ordinary numeric model features.
 
 ## Install
 
@@ -39,37 +91,30 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-The Mostly Right NWP backfill uses `mostlyrightmd-weather[nwp]`, which depends on GRIB tooling (`cfgrib`, `xarray`, `eccodes`, `ecmwflibs`).
+The Mostly Right NWP backfill uses `mostlyrightmd-weather[nwp]`, which depends on GRIB tooling such as `cfgrib`, `xarray`, `eccodes`, and `ecmwflibs`.
 
-## Commands
+## Main Commands
 
-Build normalized calibration samples from local actuals, local NBM, exact NWS captures if present, and any Mostly Right backfill cache:
-
-```powershell
-python -m src.build_calibration_dataset --project-root .
-```
-
-Backfill missing GFS/HRRR 0h rows through Mostly Right:
+Backfill 11 AM current observations:
 
 ```powershell
-python -m src.backfill_mostlyright_nwp --project-root . --models hrrr gfs
+python -m src.backfill_mostlyright_current_observations --sdk-cache-dir data/calibration/sdk_current_obs_2021_2026 --stations $stations --start-date 2021-01-01 --end-date latest-complete --chunk-days 31 --retry-unavailable --request-retries 5 --retry-sleep-seconds 90 --sleep-between-chunks 8
 ```
 
-Train walk-forward baselines from the CLI:
+Backfill 11 AM GFS/HRRR forecasts with weather features:
 
 ```powershell
-python -m src.train_calibration_models --calibration-dir data/calibration --skip-ml
+python -m src.backfill_mostlyright_sdk_nwp --sdk-cache-dir data/calibration/sdk_11am_gfs_2025_2026 --stations $stations --models gfs --timing-mode same_day_11am --start-date 2025-01-01 --end-date latest-complete --include-weather-features --fxx-workers 3
+python -m src.backfill_mostlyright_sdk_nwp --sdk-cache-dir data/calibration/sdk_11am_hrrr_2025_2026 --stations $stations --models hrrr --timing-mode same_day_11am --start-date 2025-01-01 --end-date latest-complete --include-weather-features --fxx-workers 3
 ```
 
-Run the ML comparison in the notebook:
+Backfill direct NOAA NBM:
 
-```text
-notebooks/calibration_ml_walkforward.ipynb
+```powershell
+python -m src.backfill_direct_nbm --sdk-cache-dir data/calibration/direct_nbm_2025_2026 --stations $stations --start-date 2025-01-01 --end-date latest-complete --include-weather-features
 ```
 
-The notebook writes `ml_results.csv`, refreshes `recommended_calibration_rules.csv`, and rewrites `calibration_report.md`.
-
-Run station-level 3-provider stacking notebooks:
+Run station-level stacking notebooks:
 
 ```text
 notebooks/station_stacking/stacking_KATL.ipynb
@@ -77,41 +122,45 @@ notebooks/station_stacking/stacking_KAUS.ipynb
 ...
 ```
 
-These notebooks build one wide row per station/date from same-day 11am GFS, HRRR, and NBM provider caches, compare raw-provider baselines, then run XGBoost, LightGBM, CatBoost, and a Ridge stacking model once all three providers have overlapping rows.
+Those notebooks call `src.calibration.station_stacking.run_station_stacking_experiment`, write wide station/date feature files, compare raw-provider baselines, train base models, and optionally train the Ridge stack.
 
-Write the Markdown report:
-
-```powershell
-python -m src.write_calibration_report --calibration-dir data/calibration
-```
-
-Fast local-only run, useful before the Mostly Right full backfill completes:
+Legacy 6 AM calibration report commands:
 
 ```powershell
-python -m src.build_calibration_dataset --project-root . --providers nbm
-python -m src.train_calibration_models --calibration-dir data/calibration --skip-ml
+python -m src.build_calibration_dataset --project-root .
+python -m src.train_calibration_models --calibration-dir data/calibration
 python -m src.write_calibration_report --calibration-dir data/calibration
 ```
 
 ## Outputs
 
-New research outputs are written only under `data/calibration/`:
+Station-stacking outputs are written under `data/calibration/station_stacking/`:
+
+- `{STATION}_features.csv`
+- `{STATION}_predictions.csv`
+- `{STATION}_metrics.csv`
+- `{STATION}_feature_columns.csv`
+
+Legacy calibration outputs are also under `data/calibration/`:
 
 - `calibration_samples.csv`
 - `baseline_results.csv`
 - `ml_results.csv`
 - `recommended_calibration_rules.csv`
 - `calibration_report.md`
-- `mostlyright_nwp_0h_cache.csv` when backfill is run
 
-Existing `data/raw`, `data/processed`, and legacy `data/outputs` files are read as inputs and are not overwritten by the calibration commands.
+Large local data, logs, generated caches, GRIB files, and `.venv/` are intentionally ignored by Git.
 
-## Leakage Controls
+## Guardrails
 
-- `forecast_as_of` is always `06:00` local station time converted to UTC.
-- Walk-forward evaluation trains only on earlier `contract_date` values.
-- Rolling bias and station/month climatology features use shifted historical values only.
-- Exact `nws` rows are emitted only from explicit local weather.gov capture files.
+- Never use future actuals when simulating historical decisions.
+- `actual_high_f` is the final target, not an input feature for same-day predictions.
+- Forecast features must be available at or before `forecast_as_of`.
+- 11 AM current observations must have timestamps `<= 11:00 AM local`.
+- HRRR, GFS, and NBM lineage must remain separate.
+- Direct NOAA NBM must not be labeled as SDK NBM or exact NWS.
+- Treat active-market actuals as unavailable until the local day is complete and observations are finalized.
+- Treat current ML and stacking outputs as research until training validation is finalized.
 
 ## Tests
 
