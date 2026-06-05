@@ -2,12 +2,20 @@
 
 Calibration-first Python research project for daily high-temperature forecast markets.
 
-The target is the additive forecast bias:
+The observed target variable is the final station daily high:
+
+```text
+actual_high_f
+```
+
+The calibration label is the additive forecast bias derived from that target:
 
 ```text
 calibration_bias_f = actual_high_f - raw_forecast_high_f
 calibrated_forecast_high_f = raw_forecast_high_f + predicted_calibration_bias_f
 ```
+
+In the station-stacking workflow, the models predict `actual_high_f` directly from provider forecasts, current 11 AM observations, calendar features, and lagged history. In the bias-calibration workflow, models and rules predict `calibration_bias_f` as an additive correction to the raw forecast.
 
 The current research horizon is `0h`, defined as the forecast available at `06:00` local station time on the contract date.
 
