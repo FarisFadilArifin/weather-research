@@ -819,15 +819,19 @@ def test_sdk_dataset_builder_uses_only_sdk_caches(tmp_path) -> None:
     ).to_csv(sdk_dir / sdk_pipeline.SDK_ACTUALS_FILE, index=False)
     pd.DataFrame(
         {
-            "station_id": ["KATL", "KATL"],
-            "provider": ["nbm", "nbm"],
-            "model": ["nbm", "nbm"],
-            "timing_mode": ["fresh_after_6am", "strict_6am"],
-            "contract_date": ["2026-01-01", "2026-01-01"],
-            "forecast_as_of": ["2026-01-01T12:00:00+00:00", "2026-01-01T11:00:00+00:00"],
-            "issued_at": ["2026-01-01T11:00:00+00:00", "2026-01-01T08:00:00+00:00"],
-            "raw_forecast_high_f": [73.0, 72.0],
-            "fetch_status": ["ok", "ok"],
+            "station_id": ["KATL", "KATL", "KATL"],
+            "provider": ["hrrr", "gfs", "nbm"],
+            "model": ["hrrr", "gfs", "nbm"],
+            "timing_mode": ["same_day_11am", "same_day_11am", "same_day_11am"],
+            "contract_date": ["2026-01-01", "2026-01-01", "2026-01-01"],
+            "forecast_as_of": ["2026-01-01T16:00:00+00:00"] * 3,
+            "issued_at": ["2026-01-01T15:00:00+00:00"] * 3,
+            "raw_forecast_high_f": [73.0, 74.0, 72.0],
+            "dewpoint_mean_f": [60.0, 61.0, 62.0],
+            "humidity_mean": [50.0, 51.0, 52.0],
+            "wind_speed_mean": [5.0, 6.0, pd.NA],
+            "wind_speed_max": [7.0, 8.0, pd.NA],
+            "fetch_status": ["ok", "ok", "ok"],
         }
     ).to_csv(sdk_dir / sdk_pipeline.SDK_NWP_FILE, index=False)
     samples = build_calibration_samples(
@@ -835,12 +839,14 @@ def test_sdk_dataset_builder_uses_only_sdk_caches(tmp_path) -> None:
         calibration_dir=tmp_path / "data" / "calibration",
         source_mode="sdk",
         sdk_cache_dir=sdk_dir,
-        include_timing_modes=["fresh_after_6am"],
+        include_timing_modes=["same_day_11am"],
     )
-    assert len(samples) == 1
-    assert samples.iloc[0]["provider"] == "nbm"
-    assert samples.iloc[0]["timing_mode"] == "fresh_after_6am"
-    assert samples.iloc[0]["data_source"] == "mostlyright.weather.forecast_nwp"
+    assert len(samples) == 2
+    assert set(samples["provider"]) == {"gfs", "hrrr"}
+    assert "nbm" not in set(samples["provider"])
+    assert set(samples["timing_mode"]) == {"same_day_11am"}
+    assert set(samples["data_source"]) == {"mostlyright.weather.forecast_nwp"}
+    assert samples.loc[samples["provider"].eq("hrrr"), "calibration_bias_f"].iloc[0] == 2.0
 
 
 def test_sdk_dataset_builder_includes_direct_nbm_cache_with_lineage(tmp_path, monkeypatch) -> None:
@@ -875,6 +881,7 @@ def test_sdk_dataset_builder_includes_direct_nbm_cache_with_lineage(tmp_path, mo
         calibration_dir=tmp_path / "data" / "calibration",
         source_mode="sdk",
         sdk_cache_dir=sdk_dir,
+        include_providers=["nbm"],
         include_timing_modes=["same_day_11am"],
     )
     assert len(samples) == 1
@@ -882,6 +889,68 @@ def test_sdk_dataset_builder_includes_direct_nbm_cache_with_lineage(tmp_path, mo
     assert samples.iloc[0]["model"] == "nbm"
     assert samples.iloc[0]["data_source"] == "direct_noaa_nbm_archive_grib2"
     assert samples.iloc[0]["calibration_bias_f"] == 2.0
+
+
+def test_sdk_dataset_builder_joins_safe_11am_observed_features(tmp_path) -> None:
+    sdk_dir = tmp_path / "data" / "calibration" / "sdk"
+    obs_dir = sdk_dir / "sdk_current_obs_2021_2026"
+    obs_dir.mkdir(parents=True)
+    sdk_pipeline.write_station_registry(sdk_dir, ["KATL"])
+    pd.DataFrame(
+        {
+            "station_id": ["KATL"],
+            "contract_date": ["2026-01-01"],
+            "actual_high_f": [80.0],
+            "fetch_status": ["ok"],
+        }
+    ).to_csv(sdk_dir / sdk_pipeline.SDK_ACTUALS_FILE, index=False)
+    pd.DataFrame(
+        {
+            "station_id": ["KATL"],
+            "provider": ["hrrr"],
+            "model": ["hrrr"],
+            "timing_mode": ["same_day_11am"],
+            "contract_date": ["2026-01-01"],
+            "forecast_as_of": ["2026-01-01T16:00:00+00:00"],
+            "issued_at": ["2026-01-01T15:00:00+00:00"],
+            "raw_forecast_high_f": [78.0],
+            "dewpoint_mean_f": [60.0],
+            "humidity_mean": [55.0],
+            "wind_speed_mean": [4.0],
+            "wind_speed_max": [8.0],
+            "fetch_status": ["ok"],
+        }
+    ).to_csv(sdk_dir / sdk_pipeline.SDK_NWP_FILE, index=False)
+    pd.DataFrame(
+        {
+            "station_id": ["KATL"],
+            "contract_date": ["2026-01-01"],
+            "timing_mode": ["same_day_11am"],
+            "observed_fetch_status": ["ok"],
+            "observed_temp_at_as_of_f": [70.0],
+            "observed_dewpoint_at_as_of_f": [59.0],
+            "observed_humidity_at_as_of": [68.0],
+            "observed_wind_speed_at_as_of": [6.0],
+            "observed_pressure_at_as_of": [1012.0],
+            "observed_visibility_at_as_of": [10.0],
+            "observed_as_of_age_minutes": [5],
+        }
+    ).to_csv(obs_dir / "sdk_current_observations_11am.csv", index=False)
+
+    samples = build_calibration_samples(
+        project_root=tmp_path,
+        calibration_dir=tmp_path / "data" / "calibration",
+        source_mode="sdk",
+        sdk_cache_dir=sdk_dir,
+        include_timing_modes=["same_day_11am"],
+    )
+
+    assert len(samples) == 1
+    row = samples.iloc[0]
+    assert row["actual_high_f"] == 80.0
+    assert row["calibration_bias_f"] == 2.0
+    assert row["observed_temp_at_as_of_f"] == 70.0
+    assert row["observed_as_of_age_minutes"] == 5
 
 
 def test_merge_sdk_nwp_shards_keeps_latest_by_timing_mode(tmp_path) -> None:

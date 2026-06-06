@@ -5,10 +5,10 @@ This file defines the forecast-side features for the 11 AM calibration dataset.
 ## Scope
 
 - Stations: `KATL`, `KAUS`, `KORD`, `KDAL`, `KHOU`, `KLAX`, `KMIA`, `KLGA`, `KSEA`
-- Providers/models:
+- Active deployment providers/models:
   - HRRR via Mostly Right `forecast_nwp(model="hrrr")`
   - GFS via Mostly Right `forecast_nwp(model="gfs")`
-  - NBM via direct NOAA NBM archive GRIB2 extraction, labeled `direct_noaa_nbm_archive_grib2`
+  - NBM is currently excluded from the main calibration dataset because SDK NBM has many unavailable historical station/date rows.
 - Timing mode: `same_day_11am`
 - Forecast snapshot: 11:00 AM local station time
 - Forecast window: valid times `>= 11:00 AM local` and `< next local midnight`
@@ -18,8 +18,8 @@ This file defines the forecast-side features for the 11 AM calibration dataset.
 
 - Forecast features must come only from the selected forecast cycle and valid times available at the 11 AM snapshot.
 - No observed actual high, post-11 AM observation, or same-day final actual-derived value can be used as a forecast feature.
-- HRRR, GFS, and NBM lineage must remain separate.
-- Wide station-stacking notebooks must keep the same provider-prefixed columns for all three providers, even when a provider leaves a field blank.
+- HRRR and GFS lineage must remain separate for the v2 deployment model.
+- Wide station-stacking experiment notebooks may keep provider-prefixed NBM columns for research, but the exported v2 deployment model uses GFS and HRRR only.
 - NBM must not be labeled as SDK NBM in the final dataset when it comes from direct NOAA archives.
 
 ## Feature Columns
@@ -32,22 +32,24 @@ In wide station notebooks, they become provider-prefixed columns:
 - `hrrr_<feature>`
 - `nbm_<feature>`
 
+The station-stacking v2 deployment bundles use GFS and HRRR features only. NBM-prefixed columns can exist in research artifacts but should not be required by `station_high_regressor_v2`.
+
 Exception: `raw_forecast_high_f` becomes:
 
 - `gfs_high_f`
 - `hrrr_high_f`
 - `nbm_high_f`
 
-| Feature | Unit | Meaning | HRRR SDK | GFS SDK | Direct NOAA NBM |
+| Feature | Unit | Meaning | HRRR SDK | GFS SDK | Active use |
 |---|---:|---|---|---|---|
 | `raw_forecast_high_f` | deg F | Forecast high from 11 AM through end of local day | yes | yes | yes |
-| `dewpoint_mean_f` | deg F | Mean forecast dew point over remaining day | yes | yes | optional enrichment pass |
-| `humidity_mean` | percent | Mean forecast relative humidity over remaining day | yes | yes | optional enrichment pass |
-| `wind_speed_mean` | mph | Mean forecast wind speed over remaining day | yes | yes | optional enrichment pass |
-| `wind_speed_max` | mph | Max forecast wind speed over remaining day | yes | yes | optional enrichment pass |
-| `wind_direction_mean` | degrees | Mean forecast wind direction over remaining day | enrichment pass | enrichment pass | optional enrichment pass |
-| `wind_gust_max` | mph | Max forecast wind gust over remaining day | enrichment pass | enrichment pass | optional enrichment pass |
-| `precip_amount` | mm | Total forecast precipitation over remaining day | enrichment pass | enrichment pass | optional enrichment pass |
+| `dewpoint_mean_f` | deg F | Mean forecast dew point over remaining day | yes | yes | yes |
+| `humidity_mean` | percent | Mean forecast relative humidity over remaining day | yes | yes | yes |
+| `wind_speed_mean` | mph | Mean forecast wind speed over remaining day | yes | yes | yes |
+| `wind_speed_max` | mph | Max forecast wind speed over remaining day | yes | yes | yes |
+| `wind_direction_mean` | degrees | Mean forecast wind direction over remaining day | partial | near-complete | no |
+| `wind_gust_max` | mph | Max forecast wind gust over remaining day | partial | near-complete | no |
+| `precip_amount` | mm | Total forecast precipitation over remaining day | partial | near-complete | no |
 
 Experimental cache-only fields, not used by `calibration_samples.csv`, ML training, or station-stacking until coverage is proven across all three providers:
 
@@ -108,7 +110,9 @@ These columns document forecast lineage and timing:
 
 ## Current NBM Decision
 
-Direct NOAA NBM is the selected NBM path. A direct-vs-SDK overlap check found identical cycle/window selection and nearly identical daily forecast highs:
+NBM is excluded from the active main calibration dataset for now. SDK NBM finished date-wise, but produced many unavailable station/date rows, and the SDK NBM path does not provide the same wind speed/direction feature set as HRRR/GFS.
+
+Direct NOAA NBM remains available for experiments. A direct-vs-SDK overlap check found identical cycle/window selection and nearly identical daily forecast highs:
 
 - Overlap checked: `3,826` OK station/date rows.
 - Cycle/window fields matched exactly.

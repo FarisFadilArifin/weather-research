@@ -26,17 +26,19 @@ def _notebook(station_id: str) -> dict:
                 "markdown",
                 f"""# Station Stacking - {station_id}
 
-Wide 3-provider same-day 11am notebook for `{station_id}`.
+Wide HRRR/GFS same-day 11am notebook for `{station_id}`.
 
-Set `FAST_MODE = False` after the provider pulls are complete to run the fuller walk-forward experiment.
-
-This is the current ML workflow: it predicts `actual_high_f` directly from same-day 11am provider, observation, calendar, and lagged-history features.
+This workflow tunes XGBoost, LightGBM, and CatBoost with Optuna/TPE against RMSE on two fixed validation folds: train 2021-2023 validate 2024, train 2022-2024 validate 2025. It then trains on 2021-2025, tests on 2026, adds a Ridge meta-model stack, and simulates deterministic 2-degree weather brackets without calling Polymarket.
 """,
             ),
             _cell(
                 "code",
                 """from pathlib import Path
 import sys
+import warnings
+
+warnings.filterwarnings("ignore", message="IProgress not found.*")
+warnings.filterwarnings("ignore", message="Skipping features without any observed values.*")
 
 PROJECT_ROOT = Path.cwd().resolve()
 while not (PROJECT_ROOT / "src" / "calibration" / "station_stacking.py").exists():
@@ -47,33 +49,25 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 STATION_ID = "__STATION_ID__"
-FAST_MODE = True
+FAST_MODE = False
+OPTUNA_TRIALS = 100
+STACK_OPTUNA_TRIALS = 50
+OPTUNA_VERBOSE = True
 PROJECT_ROOT
 """.replace("__STATION_ID__", station_id),
             ),
             _cell(
                 "code",
-                """import pandas as pd
-
-from src.calibration.station_stacking import (
-    BASELINE_METHODS,
-    BASE_MODEL_METHODS,
-    PROVIDER_NUMERIC_COLUMNS,
-    STACK_METHOD,
+                """from src.calibration.station_stacking import (
     StationStackingConfig,
-    build_station_wide_dataset,
-    missing_expected_model_methods,
     missing_model_dependencies,
-    provider_availability,
-    run_station_stacking_experiment,
+    run_station_year_split_experiment,
 )
 """,
             ),
             _cell(
                 "markdown",
-                """## ML Dependency Check
-
-The expected station-stacking output includes XGBoost, LightGBM, CatBoost, and the Ridge stack. This check fails early when the environment can only produce raw baselines.
+                """## Model Scores
 """,
             ),
             _cell(
@@ -85,141 +79,27 @@ if missing_packages:
         + ", ".join(missing_packages)
         + ". Install them with: python -m pip install -r requirements.txt"
     )
-missing_packages
-""",
-            ),
-            _cell(
-                "markdown",
-                """## Provider Availability
 
-This is a quick check of which same-day 11am provider rows are already available for this station.
-""",
-            ),
-            _cell(
-                "code",
-                """availability = provider_availability(PROJECT_ROOT)
-station_availability = availability.loc[availability["station_id"].eq(STATION_ID)].copy()
-station_availability
-""",
-            ),
-            _cell(
-                "markdown",
-                """## Wide Feature Table
-
-One row per station-date. GFS, HRRR, and NBM forecasts are side-by-side, with leak-safe lagged actual/error features.
-""",
-            ),
-            _cell(
-                "code",
-                """features = build_station_wide_dataset(PROJECT_ROOT, station_id=STATION_ID)
-feature_summary = pd.DataFrame(
-    [
-        {
-            "station_id": STATION_ID,
-            "rows": len(features),
-            "complete_3_provider_rows": int(features["all_provider_highs_available"].sum()),
-            "first_contract_date": features["contract_date"].min(),
-            "last_contract_date": features["contract_date"].max(),
-        }
-    ]
-)
-display(feature_summary)
-features.tail()
-""",
-            ),
-            _cell(
-                "code",
-                """provider_schema = pd.DataFrame(
-    [
-        {
-            "provider": provider,
-            "feature": feature,
-            "column": f"{provider}_{feature}" if feature != "raw_forecast_high_f" else f"{provider}_high_f",
-            "present": (f"{provider}_{feature}" if feature != "raw_forecast_high_f" else f"{provider}_high_f") in features.columns,
-            "non_null_rows": int(
-                features[
-                    f"{provider}_{feature}" if feature != "raw_forecast_high_f" else f"{provider}_high_f"
-                ].notna().sum()
-            )
-            if (f"{provider}_{feature}" if feature != "raw_forecast_high_f" else f"{provider}_high_f") in features.columns
-            else 0,
-        }
-        for provider in ("gfs", "hrrr", "nbm")
-        for feature in PROVIDER_NUMERIC_COLUMNS
-    ]
-)
-provider_schema.pivot_table(
-    index="feature",
-    columns="provider",
-    values="non_null_rows",
-    aggfunc="first",
-).loc[PROVIDER_NUMERIC_COLUMNS]
-""",
-            ),
-            _cell(
-                "markdown",
-                """## Baselines, Base Models, And Stack
-
-Raw provider baselines are evaluated first. XGBoost, LightGBM, and CatBoost are shown separately, then the Ridge meta-model is evaluated on leak-safe walk-forward base predictions.
-""",
-            ),
-            _cell(
-                "code",
-                """config = StationStackingConfig(
+config = StationStackingConfig(
     station_id=STATION_ID,
     project_root=PROJECT_ROOT,
     fast_mode=FAST_MODE,
+    optuna_trials=OPTUNA_TRIALS,
+    stack_optuna_trials=STACK_OPTUNA_TRIALS,
+    optuna_verbose=OPTUNA_VERBOSE,
 )
-result = run_station_stacking_experiment(config)
-missing_methods = missing_expected_model_methods(result.metrics)
-if missing_methods:
-    raise RuntimeError(
-        "Station-stacking output is incomplete. Missing methods: "
-        + ", ".join(missing_methods)
-        + ". Check complete provider overlap and ML dependencies before trusting saved metrics."
-    )
-result.metrics
-""",
-            ),
-            _cell(
-                "code",
-                """separate_model_methods = [*BASE_MODEL_METHODS, STACK_METHOD]
-result.metrics.loc[result.metrics["method"].isin(separate_model_methods)].sort_values(
-    ["evaluation_scope", "mae_f", "method"]
-)
+result = run_station_year_split_experiment(config)
+result.scoreboard
 """,
             ),
             _cell(
                 "markdown",
-                """## Predictions And Output Files
+                """## 2026 Weather Brackets
 """,
             ),
             _cell(
                 "code",
-                """result.predictions.tail(30)
-""",
-            ),
-            _cell(
-                "code",
-                """prediction_wide = result.predictions.pivot_table(
-    index="contract_date",
-    columns="method",
-    values="predicted_high_f",
-    aggfunc="first",
-)
-actual = result.predictions.groupby("contract_date")["actual_high_f"].first()
-plot_frame = prediction_wide.join(actual)
-if not plot_frame.empty:
-    ax = plot_frame.tail(120).plot(figsize=(14, 6), title=f"{STATION_ID} predictions vs actual")
-    ax.set_ylabel("Daily high (F)")
-else:
-    print("No predictions available yet. Re-run after all 3 provider pulls have enough overlapping dates.")
-""",
-            ),
-            _cell(
-                "code",
-                """display(result.feature_columns)
-result.output_paths
+                """result.bracket_metrics
 """,
             ),
         ],

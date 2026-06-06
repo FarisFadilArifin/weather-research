@@ -2,22 +2,49 @@
 
 This file defines the actual observed conditions to pull at the 11 AM forecast snapshot.
 
-These are not forecast features. They are actual station observations available at or before 11:00 AM local time on the contract date.
+These are not forecast features. They are actual station observations from the deployment observation window around the 11:00 AM local forecast snapshot.
 
 ## Scope
 
 - Stations: `KATL`, `KAUS`, `KORD`, `KDAL`, `KHOU`, `KLAX`, `KMIA`, `KLGA`, `KSEA`
 - Observation snapshot: 11:00 AM local station time
-- Observation selection rule: use the latest observation with timestamp `<= 11:00 AM local`
+- Observation selection rule for deployment: use the latest observation with timestamp from `10:50 AM local` through `11:10 AM local`
 - Staleness tracking: always record the exact observation time and age in minutes
 
 ## Leakage Contract
 
-- Observation timestamp must be `<= 11:00 AM local`.
-- Do not use observations after 11 AM.
+- Observation timestamp must satisfy `10:50 AM local <= observed_at <= 11:10 AM local`.
+- Do not use observations after 11:10 AM local.
+- Do not use observations before 10:50 AM local for deployment inference.
 - Do not use `actual_high_f` or any same-day final actual-derived summary as an input feature.
 - Daily high target remains `actual_high_f`.
-- These features are operationally valid only because they would have been known at the 11 AM decision time.
+- These features are operationally valid only because they would have been known by the bot decision time after the 11:10 AM observation-window close.
+
+## Deployment Timing Rule
+
+The model does not require an observation timestamped exactly 11:00 AM. Use the latest station observation in this deployment window:
+
+```text
+10:50 AM local <= observed_at <= 11:10 AM local
+```
+
+Because METAR reports can arrive a few minutes after their actual observation timestamp, separate the observation window from the bot run:
+
+```text
+observation_window_start = 10:50 AM local
+observation_window_end = 11:10 AM local
+bot_decision_time = 11:10 AM local or 11:15 AM local
+```
+
+If `received_at` is available, also require:
+
+```text
+received_at <= bot_decision_time
+```
+
+If `received_at` is unavailable, run inference with the small delay and record `observed_as_of_time_local`, `observed_as_of_time_utc`, and either a signed `observed_as_of_age_minutes` or a clearer `observed_offset_minutes_from_11am`. Reject or mark the prediction unavailable if no valid observation exists inside the 10:50-11:10 window.
+
+This widens the current-observation contract relative to the older `<= 11:00 AM` cache rule. Retrain the station-stacking v2 artifacts and re-export model weights with this same observation rule before relying on post-11:00 observations in production.
 
 ## Source Rule
 
@@ -59,7 +86,7 @@ Do not silently mix in outside observations unless the research direction explic
 | `observed_snow_depth_at_as_of` | inches | Snow depth at or before 11 AM local, if reported | optional, sparse |
 | `observed_as_of_time_local` | timestamp | Local timestamp of the observation used | required |
 | `observed_as_of_time_utc` | timestamp | UTC timestamp of the observation used | required |
-| `observed_as_of_age_minutes` | minutes | Minutes between 11 AM local and the observation used | required |
+| `observed_as_of_age_minutes` | minutes | Signed minutes between 11 AM local and the observation used, if this legacy name is retained | required |
 | `observed_source` | text | Observation source lineage | required |
 | `observed_observation_type` | text | Raw observation type, usually METAR/SPECI where reported | useful |
 | `observed_qc_field` | text | Raw SDK QC field, if provided | useful |
@@ -113,7 +140,7 @@ python -m src.backfill_mostlyright_current_observations --sdk-cache-dir data/cal
 
 ## Modeling Use
 
-These columns may be used as ML features because they are known at 11 AM. They should be shared across all providers for the same station/date, then joined onto each provider row in the calibration dataset.
+These columns may be used as ML features because they are known by the post-window bot decision time. For station-stacking v2 deployment, they should be shared across the same station/date row used by HRRR and GFS.
 
 They must not replace the target:
 

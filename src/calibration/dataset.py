@@ -12,6 +12,29 @@ from .sdk_pipeline import DIRECT_NBM_FILE, SDK_ACTUALS_FILE, SDK_NWP_FILE, SDK_S
 from .time_rules import forecast_as_of_utc
 
 
+DEFAULT_SDK_PROVIDERS = ("hrrr", "gfs")
+DEFAULT_SDK_START_DATE = "2021-01-01"
+
+CURRENT_OBSERVATION_FILE = "sdk_current_observations_11am.csv"
+CURRENT_OBSERVATION_CACHE_PATTERN = "sdk_current_obs_*/sdk_current_observations_11am.csv"
+
+SAFE_FORECAST_NUMERIC_COLUMNS = [
+    "dewpoint_mean_f",
+    "humidity_mean",
+    "wind_speed_mean",
+    "wind_speed_max",
+]
+
+SAFE_OBSERVED_NUMERIC_COLUMNS = [
+    "observed_temp_at_as_of_f",
+    "observed_dewpoint_at_as_of_f",
+    "observed_humidity_at_as_of",
+    "observed_wind_speed_at_as_of",
+    "observed_pressure_at_as_of",
+    "observed_visibility_at_as_of",
+    "observed_as_of_age_minutes",
+]
+
 CALIBRATION_COLUMNS = [
     "station_id",
     "station_name",
@@ -37,13 +60,11 @@ CALIBRATION_COLUMNS = [
     "forecast_issue_hour_utc",
     "forecast_cycle_hour",
     "forecast_lead_hours",
-    "precip_amount",
-    "wind_speed_mean",
-    "wind_speed_max",
-    "wind_direction_mean",
-    "wind_gust_max",
     "dewpoint_mean_f",
     "humidity_mean",
+    "wind_speed_mean",
+    "wind_speed_max",
+    *SAFE_OBSERVED_NUMERIC_COLUMNS,
     "provider_disagreement_f",
     "rain_regime",
     "cloud_regime",
@@ -62,13 +83,10 @@ CALIBRATION_COLUMNS = [
 ]
 
 WEATHER_NUMERIC_COLUMNS = [
-    "precip_amount",
-    "wind_speed_mean",
-    "wind_speed_max",
-    "wind_direction_mean",
-    "wind_gust_max",
     "dewpoint_mean_f",
     "humidity_mean",
+    "wind_speed_mean",
+    "wind_speed_max",
 ]
 
 
@@ -89,14 +107,18 @@ def build_calibration_samples(
 
     if source_mode == "sdk":
         sdk_dir = Path(sdk_cache_dir) if sdk_cache_dir is not None else default_sdk_cache_dir(out_dir)
+        if providers is None:
+            providers = set(DEFAULT_SDK_PROVIDERS)
         actuals = _load_sdk_actuals(sdk_dir)
         station_meta = _load_sdk_station_meta(root, sdk_dir)
         forecast_frames = [_load_sdk_nwp_cache(sdk_dir, station_meta)]
+        current_observations = _load_current_observations(sdk_dir)
         if _include_direct_nbm_cache():
             forecast_frames.append(_load_direct_nbm_cache(sdk_dir, station_meta))
     elif source_mode == "legacy":
         actuals = _load_actuals(root)
         station_meta = _load_station_meta(root)
+        current_observations = pd.DataFrame()
         forecast_frames = [
             _load_local_nbm(root, station_meta),
             _load_mostlyright_nwp_cache(out_dir, station_meta),
@@ -107,6 +129,8 @@ def build_calibration_samples(
     forecasts = pd.concat([frame for frame in forecast_frames if not frame.empty], ignore_index=True)
     if providers is not None and not forecasts.empty:
         forecasts = forecasts.loc[forecasts["provider"].astype(str).str.lower().isin(providers)].copy()
+    if source_mode == "sdk" and not forecasts.empty:
+        forecasts = forecasts.loc[forecasts["contract_date"].astype(str).str[:10] >= DEFAULT_SDK_START_DATE].copy()
     if timing_modes is not None and not forecasts.empty:
         if "timing_mode" not in forecasts.columns:
             forecasts["timing_mode"] = "strict_6am"
@@ -129,6 +153,8 @@ def build_calibration_samples(
         on=["station_id", "contract_date"],
         how="inner",
     )
+    if not current_observations.empty:
+        joined = joined.merge(current_observations, on=["station_id", "contract_date"], how="left")
     joined = joined.dropna(subset=["actual_high_f", "raw_forecast_high_f"]).copy()
     joined["calibration_bias_f"] = joined["actual_high_f"] - joined["raw_forecast_high_f"]
     joined["absolute_error_before"] = joined["calibration_bias_f"].abs()
@@ -165,7 +191,7 @@ def _load_actuals(root: Path) -> pd.DataFrame:
 
 
 def _load_sdk_actuals(sdk_dir: Path) -> pd.DataFrame:
-    path = sdk_dir / SDK_ACTUALS_FILE
+    path = _sdk_metadata_path(sdk_dir, SDK_ACTUALS_FILE)
     if not path.exists():
         raise FileNotFoundError(f"Missing SDK actual highs: {path}")
     actuals = pd.read_csv(path)
@@ -182,6 +208,46 @@ def _load_sdk_actuals(sdk_dir: Path) -> pd.DataFrame:
     return out.dropna(subset=["actual_high_f"])
 
 
+def _load_current_observations(sdk_dir: Path) -> pd.DataFrame:
+    paths = _cache_paths(sdk_dir, CURRENT_OBSERVATION_FILE, CURRENT_OBSERVATION_CACHE_PATTERN)
+    if not paths:
+        return pd.DataFrame(columns=["station_id", "contract_date", *SAFE_OBSERVED_NUMERIC_COLUMNS])
+    frames: list[pd.DataFrame] = []
+    for path in paths:
+        frame = pd.read_csv(path, low_memory=False)
+        if frame.empty:
+            continue
+        required = ["station_id", "contract_date", "timing_mode", "observed_fetch_status", *SAFE_OBSERVED_NUMERIC_COLUMNS]
+        for column in required:
+            if column not in frame:
+                frame[column] = pd.NA
+        frame = frame[required].copy()
+        frame["source_cache_dir"] = path.parent.name
+        frame["source_cache_mtime"] = path.stat().st_mtime
+        frames.append(frame)
+    if not frames:
+        return pd.DataFrame(columns=["station_id", "contract_date", *SAFE_OBSERVED_NUMERIC_COLUMNS])
+    out = pd.concat(frames, ignore_index=True)
+    out["station_id"] = out["station_id"].astype(str).str.upper()
+    out["contract_date"] = out["contract_date"].astype(str).str[:10]
+    out["timing_mode"] = out["timing_mode"].astype(str).str.lower()
+    out["observed_fetch_status"] = out["observed_fetch_status"].astype(str).str.lower()
+    out = out.loc[
+        out["timing_mode"].eq("same_day_11am")
+        & out["observed_fetch_status"].eq("ok")
+    ].copy()
+    if out.empty:
+        return pd.DataFrame(columns=["station_id", "contract_date", *SAFE_OBSERVED_NUMERIC_COLUMNS])
+    for column in SAFE_OBSERVED_NUMERIC_COLUMNS:
+        out[column] = pd.to_numeric(out[column], errors="coerce")
+    out = out.sort_values(
+        ["station_id", "contract_date", "source_cache_mtime", "source_cache_dir"],
+        ascending=[True, True, False, True],
+    )
+    out = out.drop_duplicates(["station_id", "contract_date"], keep="first")
+    return out[["station_id", "contract_date", *SAFE_OBSERVED_NUMERIC_COLUMNS]].reset_index(drop=True)
+
+
 def _load_station_meta(root: Path) -> pd.DataFrame:
     path = root / "data" / "processed" / "station_registry.csv"
     if not path.exists():
@@ -193,7 +259,7 @@ def _load_station_meta(root: Path) -> pd.DataFrame:
 
 
 def _load_sdk_station_meta(root: Path, sdk_dir: Path) -> pd.DataFrame:
-    path = sdk_dir / SDK_STATION_REGISTRY_FILE
+    path = _sdk_metadata_path(sdk_dir, SDK_STATION_REGISTRY_FILE)
     if path.exists():
         frame = pd.read_csv(path)
     else:
@@ -207,6 +273,16 @@ def _load_sdk_station_meta(root: Path, sdk_dir: Path) -> pd.DataFrame:
     frame = frame.copy()
     frame["station_id"] = frame["station_id"].astype(str).str.upper()
     return frame
+
+
+def _sdk_metadata_path(sdk_dir: Path, filename: str) -> Path:
+    direct = sdk_dir / filename
+    if direct.exists():
+        return direct
+    nested = sdk_dir / "sdk" / filename
+    if nested.exists():
+        return nested
+    return direct
 
 
 def _load_local_nbm(root: Path, station_meta: pd.DataFrame) -> pd.DataFrame:
