@@ -2,6 +2,8 @@
 
 Python research pipeline for daily high-temperature forecast markets. The current deployment direction is a same-day 11 AM station-stacking v2 workflow that combines GFS, HRRR, current station observations, calendar features, lagged history, and notebook-v2 engineered features.
 
+New collaborators should start with [QUICKSTART.md](QUICKSTART.md). Local data expectations are documented in [DATA.md](DATA.md), and notebook status is documented in [notebooks/README.md](notebooks/README.md).
+
 The observed target variable is the final station daily high:
 
 ```text
@@ -106,6 +108,7 @@ cd D:\dev\weather-research
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
 
 The Mostly Right NWP backfill uses `mostlyrightmd-weather[nwp]`, which depends on GRIB tooling such as `cfgrib`, `xarray`, `eccodes`, and `ecmwflibs`.
