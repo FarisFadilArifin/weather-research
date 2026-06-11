@@ -94,7 +94,19 @@ hrrr_wind_speed_mean
 gfs_wind_speed_mean
 hrrr_wind_speed_max
 gfs_wind_speed_max
+hrrr_precip_total_mm
+gfs_precip_total_mm
+hrrr_precip_max_1h_mm
+gfs_precip_max_1h_mm
+hrrr_precip_hours_count
+gfs_precip_hours_count
+hrrr_has_precip
+gfs_has_precip
+hrrr_precip_intensity_code
+gfs_precip_intensity_code
 ```
+
+Precipitation forecast fields are numeric model inputs when the exported bundle includes them. They are allowed because they are known at forecast time, but they are optional by bundle: if a given `feature_names` contract does not include them, leave them out or pass `NaN` and let the bundle contract decide.
 
 ## Current Observation Rule
 
@@ -142,15 +154,39 @@ Compute or use these current-observation features:
 
 ```text
 observed_temp_at_as_of_f
+observed_high_temp_through_as_of_f
 observed_dewpoint_at_as_of_f
 observed_humidity_at_as_of
 observed_wind_speed_at_as_of
 observed_wind_direction_at_as_of
 observed_pressure_at_as_of
 observed_visibility_at_as_of
+observed_precip_recent_at_as_of
+observed_precip_intensity_code
+observed_precip_intensity
 observed_as_of_age_minutes
 observed_offset_minutes_from_11am
 ```
+
+Feature types:
+
+| Field | Type | Unit | Bot/inference use |
+|---|---|---:|---|
+| `observed_temp_at_as_of_f` | numeric feature | deg F | Required live feature |
+| `observed_high_temp_through_as_of_f` | numeric feature | deg F | Required live sanity/feature field; must be `<= predicted final high` in reasonableness checks |
+| `observed_dewpoint_at_as_of_f` | numeric feature | deg F | Live feature when present |
+| `observed_humidity_at_as_of` | numeric feature | percent | Live feature when present |
+| `observed_wind_speed_at_as_of` | numeric feature | mph | Live feature when present |
+| `observed_wind_direction_at_as_of` | numeric feature | degrees | Live feature when present; also encoded as sine/cosine |
+| `observed_pressure_at_as_of` | numeric feature | hPa/inHg normalized by builder | Live feature when present |
+| `observed_visibility_at_as_of` | numeric feature | miles | Live feature when present |
+| `observed_precip_recent_at_as_of` | numeric feature | inches or mm | Live feature when present; often sparse |
+| `observed_precip_intensity_code` | numeric/categorical feature | code | Derived from recent precip and METAR present-weather codes |
+| `observed_precip_intensity` | categorical/audit feature | text | Derived label, usually for lineage and feature engineering |
+| `observed_as_of_age_minutes` | numeric feature/audit | minutes | Prefer signed offset from 11 AM if retained |
+| `observed_offset_minutes_from_11am` | numeric feature/audit | minutes | Preferred explicit signed offset field |
+| `observed_as_of_time_local` | lineage/audit | timestamp | Required for point-in-time validation, not a numeric model input |
+| `observed_as_of_time_utc` | lineage/audit | timestamp | Required for point-in-time validation, not a numeric model input |
 
 If the legacy feature name `observed_as_of_age_minutes` is retained, define it carefully because observations after 11:00 AM are now allowed. Either store signed minutes relative to 11:00 AM, where 10:53 is `+7` and 11:07 is `-7`, or add `observed_offset_minutes_from_11am` and retrain/export the model bundle with that feature contract.
 
@@ -167,6 +203,8 @@ provider_spread_high_f = provider_max_high_f - provider_min_high_f
 provider_std_high_f = std(hrrr_high_f, gfs_high_f)
 hrrr_high_minus_obs_temp_f = hrrr_high_f - observed_temp_at_as_of_f
 gfs_high_minus_obs_temp_f = gfs_high_f - observed_temp_at_as_of_f
+hrrr_high_minus_observed_high_temp_f = hrrr_high_f - observed_high_temp_through_as_of_f
+gfs_high_minus_observed_high_temp_f = gfs_high_f - observed_high_temp_through_as_of_f
 observed_dewpoint_depression_f = observed_temp_at_as_of_f - observed_dewpoint_at_as_of_f
 observed_wind_dir_sin = sin(radians(observed_wind_direction_at_as_of))
 observed_wind_dir_cos = cos(radians(observed_wind_direction_at_as_of))
@@ -203,6 +241,49 @@ Important: widening observations from 10:50-11:00 to 10:50-11:10 changes the liv
 All lagged actual and provider-error features must use only completed dates strictly earlier than `contract_date`. For an active same-day market, `actual_high_f` for the current `contract_date` is unknown and must never be used as an input.
 
 For any feature in `bundle["feature_names"]` that is structurally unavailable at inference time but not part of the hard-required live data, create the column with `null`/`NaN` and let the fitted preprocessing pipeline impute it. Do not invent substitute values from future data or city data.
+
+## Strict Data Quality Contract
+
+The current training/evaluation pipeline adds strict quality columns to station-stacking feature artifacts and calibration samples:
+
+| Field | Type | Scope | Meaning | Bot/inference use |
+|---|---|---|---|---|
+| `strict_quality_ok` | boolean | training/eval artifact | `true` when the row passes label, current-observation, and forecast sanity checks | Do not pass to base model unless it appears in `bundle["feature_names"]`; normally audit/gating only |
+| `strict_quality_issues` | semicolon-separated string | training/eval artifact | Names of failed checks, such as `actual_below_observed_high_so_far` or `actual_quality_not_ok` | Audit/logging only |
+| `actual_source` | string | completed historical rows | Source lineage for the final high label | Training/eval lineage only; unavailable for active same-day inference |
+| `actual_data_quality_flag` | string/categorical | completed historical rows | Label quality from actual-high construction, usually `ok` or `sparse_observations` | Training/eval gate only |
+| `actual_raw_observation_count` | numeric | completed historical rows | Number of observations used to compute historical `actual_high_f` | Training/eval gate only |
+
+Strict checks exclude rows from training/evaluation when they fail rules such as:
+
+```text
+actual_high_f is missing or outside plausible Fahrenheit range
+actual_data_quality_flag != ok
+actual_raw_observation_count < 18
+observed_fetch_status is missing or not ok
+observed_temp_at_as_of_f is missing when observed_fetch_status == ok
+observed_high_temp_through_as_of_f is missing when observed_fetch_status == ok
+actual_high_f < observed_high_temp_through_as_of_f
+observed_temp_at_as_of_f > actual_high_f
+observed_as_of_age_minutes > 20
+hrrr_high_f or gfs_high_f outside plausible Fahrenheit range
+```
+
+These columns are not a market signal and are not a same-day target substitute. They define the benchmark population. Report metrics as `strict 2026 holdout` when these filters are active, and include excluded-row counts and reason summaries next to accuracy metrics.
+
+At live bot inference time, `strict_quality_ok` for the current day cannot be fully known because `actual_high_f` is unknown. The bot should instead run the live subset of strict checks:
+
+```text
+station_id is supported
+HRRR and GFS highs are present and plausible Fahrenheit values
+current observation is inside 10:50-11:10 local
+observed_fetch_status == ok
+observed_temp_at_as_of_f is present and plausible
+observed_high_temp_through_as_of_f is present and plausible
+prediction should normally be >= observed_high_temp_through_as_of_f
+```
+
+If a live hard check fails, return `predictionStatus = "unavailable"` with the specific reason. If the model predicts below the already observed high-so-far, clamp only for downstream market-bracket sanity if the trading policy explicitly allows it; always log both raw and adjusted predictions.
 
 ## ML Model
 
@@ -289,6 +370,7 @@ contract_date
 hrrr_high_f
 gfs_high_f
 observed_temp_at_as_of_f
+observed_high_temp_through_as_of_f
 observed_as_of_time_local
 10:50 AM local <= observed_at <= 11:10 AM local
 ```
@@ -349,6 +431,7 @@ Return this JSON for every prediction:
   "hrrrHighF": 76.2,
   "gfsHighF": 74.8,
   "observedTempAtAsOfF": 68.0,
+  "observedHighTempThroughAsOfF": 70.0,
   "observedAtLocal": "2026-06-06T11:07:00",
   "observedOffsetMinutesFrom11am": -7,
   "modelVersion": "station_high_regressor_v2",
@@ -362,6 +445,9 @@ Return this JSON for every prediction:
     "forecastProviders": ["hrrr", "gfs"],
     "observationRule": "latest_station_observation_between_1050_and_1110_local",
     "featurePipeline": "station_stacking_v2",
+    "dataQualityPolicy": "strict_training_eval_live_subset_at_inference",
+    "strictQualityOk": null,
+    "strictQualityIssues": [],
     "target": "airport_station_actual_high_f",
     "stackFeatures": [
       "xgboost_predicted_high_f",

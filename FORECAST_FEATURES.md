@@ -49,7 +49,13 @@ Exception: `raw_forecast_high_f` becomes:
 | `wind_speed_max` | mph | Max forecast wind speed over remaining day | yes | yes | yes |
 | `wind_direction_mean` | degrees | Mean forecast wind direction over remaining day | partial | near-complete | no |
 | `wind_gust_max` | mph | Max forecast wind gust over remaining day | partial | near-complete | no |
-| `precip_amount` | mm | Total forecast precipitation over remaining day | partial | near-complete | no |
+| `precip_amount` | mm | Legacy total forecast precipitation over remaining day | partial | near-complete | v4 fallback |
+| `forecast_precip_total_mm` | mm | Total forecast precipitation over remaining day | partial | near-complete | v4 |
+| `forecast_precip_max_1h_mm` | mm | Wettest forecast hour over remaining day | partial | near-complete | v4 |
+| `forecast_precip_hours_count` | hours | Count of forecast hours with precipitation over remaining day | partial | near-complete | v4 |
+| `forecast_has_precip` | 0/1 | Whether total forecast precipitation is above zero | partial | near-complete | v4 |
+| `forecast_precip_intensity_code` | category code | Dry/trace-or-drizzle/light/moderate/heavy code from hourly precip rate | partial | near-complete | v4 |
+| `forecast_precip_intensity` | text | Audit label for `forecast_precip_intensity_code` | partial | near-complete | no |
 
 Experimental cache-only fields, not used by `calibration_samples.csv`, ML training, or station-stacking until coverage is proven across all three providers:
 
@@ -67,6 +73,8 @@ Forecast snapshot fields at exactly 11 AM, such as `forecast_temp_at_as_of_f`, `
 Direct NOAA NBM core rows may initially contain only `raw_forecast_high_f`. Re-run the same shard with `--include-weather-features` after the core NBM rows finish; the command revisits only rows without `weather_features_included=true`.
 
 Mostly Right HRRR/GFS rows can also be revisited with `--include-weather-features`; this skips unavailable rows and only re-fetches OK rows that predate the feature checkpoint flag.
+
+The precipitation enrichment uses the same SDK hourly rows and does not add extra provider calls beyond the existing per-forecast-hour fetches. New rows carry `precip_features_included=true`; old OK rows without that marker are revisited by `--include-weather-features`.
 
 SDK HRRR/GFS enrichment commands:
 
