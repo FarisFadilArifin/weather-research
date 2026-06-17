@@ -20,7 +20,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Revisit completed OK rows that were written before weather feature enrichment was tracked. "
-            "Unavailable rows remain checkpointed."
+            "Also revisits OK rows missing the precipitation feature checkpoint. Unavailable rows remain checkpointed."
+        ),
+    )
+    parser.add_argument(
+        "--temperature-only",
+        action="store_true",
+        help=(
+            "Fetch only 2m temperature for fast high-temperature training caches. "
+            "Rows remain eligible for a later --include-weather-features enrichment pass."
         ),
     )
     parser.add_argument(
@@ -48,6 +56,7 @@ def main() -> None:
         batch_stations=not args.no_batch_stations,
         fxx_workers=args.fxx_workers,
         include_weather_features=args.include_weather_features,
+        temperature_only=args.temperature_only,
     )
     logging.info("SDK NWP cache rows: %s", len(frame))
 

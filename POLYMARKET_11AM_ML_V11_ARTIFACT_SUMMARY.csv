@@ -1,0 +1,10 @@
+station,feature_rows,feature_count,categorical_count,numeric_count,modeling_rows,export_train_rows,stack_feature_set,stack_features,test_2026_ridge_mae_f,test_2026_ridge_rmse_f,test_2026_count
+KATL,1964,197,3,194,1956,1956,models_only,xgboost_predicted_high_f lightgbm_predicted_high_f catboost_predicted_high_f,1.5319,2.2098,137
+KAUS,1964,197,3,194,1954,1954,models_only,xgboost_predicted_high_f lightgbm_predicted_high_f catboost_predicted_high_f,1.5877,2.1388,137
+KDAL,1964,197,3,194,1953,1953,models_only,xgboost_predicted_high_f lightgbm_predicted_high_f catboost_predicted_high_f,1.43,1.9079,138
+KHOU,1964,197,3,194,1953,1953,models_only,xgboost_predicted_high_f lightgbm_predicted_high_f catboost_predicted_high_f,1.4567,2.0139,138
+KLAX,1964,197,3,194,1956,1956,models_plus_raw,xgboost_predicted_high_f lightgbm_predicted_high_f catboost_predicted_high_f hrrr_raw_predicted_high_f gfs_raw_predicted_high_f,1.4394,1.7884,137
+KLGA,1964,197,3,194,1945,1945,models_only,xgboost_predicted_high_f lightgbm_predicted_high_f catboost_predicted_high_f,1.6507,2.1434,138
+KMIA,1964,197,3,194,1960,1960,models_plus_raw,xgboost_predicted_high_f lightgbm_predicted_high_f catboost_predicted_high_f hrrr_raw_predicted_high_f gfs_raw_predicted_high_f,1.6119,2.1494,137
+KORD,1964,197,3,194,1937,1937,models_only,xgboost_predicted_high_f lightgbm_predicted_high_f catboost_predicted_high_f,1.4385,1.9677,137
+KSEA,1964,198,3,195,1953,1953,models_plus_raw,xgboost_predicted_high_f lightgbm_predicted_high_f catboost_predicted_high_f hrrr_raw_predicted_high_f gfs_raw_predicted_high_f,1.3953,1.7308,136

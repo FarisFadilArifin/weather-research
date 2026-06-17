@@ -52,7 +52,19 @@ data/calibration/station_stacking_v6/{STATION}_feature_columns.csv
 
 Those files list the categorical and numeric columns passed into the model pipeline. The matching `{STATION}_features.csv` file can be used to audit per-feature NaN percentages. Current v6 artifacts contain 237 candidate training inputs: 6 categorical and 231 numeric.
 
-Do not infer the trained feature matrix only from constants such as `V6_FEATURE_COLUMNS`. The trainer removes numeric columns that are all-NaN for a fit, and the current historical cache leaves the four v6 observation trend fields empty, so those trend fields do not enter the saved v6 training feature list until the cache is repopulated with non-null values.
+Do not infer the trained feature matrix only from constants such as `V6_FEATURE_COLUMNS`. The trainer removes numeric columns that are all-NaN for a fit, so the authoritative feature contract is the saved `{STATION}_feature_columns.csv` artifact.
+
+## V7 Live-Safe NBM Experiment
+
+`notebooks/station_stacking_v7/` is the current experimental path for retraining on corrected live-safe forecast timing. It uses `timing_mode="same_day_11am_live_safe"`, providers `("gfs", "hrrr", "nbm")`, direct 13Z NBM raw-high cache inclusion, v6/v7 11 AM observation trend inputs, expanding folds `2021-2023 -> 2024` and `2021-2024 -> 2025`, and 2026 as the OOF holdout year.
+
+The v7 notebooks set Optuna to 50 base-model trials and 50 stack trials with 20 random startup trials, using the wider hyperparameter space. Artifacts are written to `data/calibration/station_stacking_v7`.
+
+## V8 Remaining-Warmup Feature Experiment
+
+`notebooks/station_stacking_v8/` is an experimental successor to v7. It keeps the v7 live-safe GFS/HRRR/NBM timing contract and direct `actual_high_f` target, adds source-owned remaining-warmup features, and conservatively drops fixed or consistently zero-importance model inputs. Artifacts are written to `data/calibration/station_stacking_v8`.
+
+V8 is not the production default unless its 2026 OOF MAE, bucket accuracy, and large-miss behavior beat the v7 ridge-stack benchmark.
 
 ## Legacy / Reference
 

@@ -7,6 +7,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .data_quality import filter_strict_training_rows
+
 
 BASELINE_METHODS = [
     "global_provider_mean_bias",
@@ -386,6 +388,7 @@ def _feature_columns(frame: pd.DataFrame) -> tuple[list[str], list[str]]:
         "wind_speed_mean",
         "wind_speed_max",
         "observed_temp_at_as_of_f",
+        "observed_high_temp_through_as_of_f",
         "observed_dewpoint_at_as_of_f",
         "observed_humidity_at_as_of",
         "observed_wind_speed_at_as_of",
@@ -412,6 +415,9 @@ def _clean_samples(samples: pd.DataFrame) -> pd.DataFrame:
     if samples.empty:
         return pd.DataFrame()
     clean = samples.dropna(subset=["contract_date", TARGET, "raw_forecast_high_f"]).copy()
+    clean = filter_strict_training_rows(clean)
+    if clean.empty:
+        return pd.DataFrame()
     clean["contract_date"] = pd.to_datetime(clean["contract_date"], errors="coerce").dt.date.astype(str)
     clean = clean.dropna(subset=["contract_date"])
     clean["month"] = pd.to_numeric(clean["month"], errors="coerce").astype("Int64")

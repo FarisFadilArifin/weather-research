@@ -5,17 +5,30 @@ import os
 from importlib.util import find_spec
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+
+from .data_quality import (
+    STRICT_QUALITY_ISSUES_COLUMN,
+    STRICT_QUALITY_OK_COLUMN,
+    add_strict_quality_flags,
+    plausible_temperature_mask,
+)
 
 
 TARGET_STATIONS = ("KATL", "KAUS", "KORD", "KDAL", "KHOU", "KLAX", "KMIA", "KLGA", "KSEA")
 TARGET_PROVIDERS = ("gfs", "hrrr")
 OPTIONAL_PROVIDERS = ("nbm",)
 TARGET = "actual_high_f"
+OBSERVED_HIGH_SO_FAR_COLUMN = "observed_high_temp_through_as_of_f"
+REMAINING_WARMUP_TARGET = "remaining_warmup_from_observed_high_so_far_f"
+TARGET_MODE_DIRECT_HIGH = "actual_high"
+TARGET_MODE_REMAINING_WARMUP = "remaining_warmup"
+TIMING_MODE_SAME_DAY_11AM = "same_day_11am"
+TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE = "same_day_11am_live_safe"
 
 FORECAST_CACHE_PATTERNS = (
     ("sdk_nwp_0h_cache.csv", "sdk_11am_*/sdk_nwp_0h_cache.csv"),
@@ -44,6 +57,12 @@ FORECAST_COLUMNS = [
     "forecast_hour_max",
     "grid_dist_km_mean",
     "precip_amount",
+    "forecast_precip_total_mm",
+    "forecast_precip_max_1h_mm",
+    "forecast_precip_hours_count",
+    "forecast_has_precip",
+    "forecast_precip_intensity_code",
+    "forecast_precip_intensity",
     "wind_speed_mean",
     "wind_speed_max",
     "wind_direction_mean",
@@ -63,6 +82,11 @@ PROVIDER_NUMERIC_COLUMNS = [
     "forecast_hour_max",
     "grid_dist_km_mean",
     "precip_amount",
+    "forecast_precip_total_mm",
+    "forecast_precip_max_1h_mm",
+    "forecast_precip_hours_count",
+    "forecast_has_precip",
+    "forecast_precip_intensity_code",
     "wind_speed_mean",
     "wind_speed_max",
     "wind_direction_mean",
@@ -79,6 +103,7 @@ PROVIDER_TEXT_COLUMNS = [
     "issued_at",
     "forecast_window_start",
     "forecast_window_end",
+    "forecast_precip_intensity",
     "data_source",
     "source_file_or_url",
     "source_cache_dir",
@@ -86,6 +111,7 @@ PROVIDER_TEXT_COLUMNS = [
 
 OBSERVED_NUMERIC_COLUMNS = [
     "observed_temp_at_as_of_f",
+    "observed_high_temp_through_as_of_f",
     "observed_dewpoint_at_as_of_f",
     "observed_humidity_at_as_of",
     "observed_wind_speed_at_as_of",
@@ -102,6 +128,10 @@ OBSERVED_NUMERIC_COLUMNS = [
     "observed_precip_recent_at_as_of",
     "observed_snow_depth_at_as_of",
     "observed_as_of_age_minutes",
+    "observed_temp_change_last_1h_f",
+    "observed_temp_change_last_3h_f",
+    "observed_morning_warmup_rate_f_per_hour",
+    "observed_high_so_far_change_since_9am_f",
 ]
 
 OBSERVED_TEXT_COLUMNS = [
@@ -121,6 +151,7 @@ OBSERVED_TEXT_COLUMNS = [
 OBSERVED_CATEGORICAL_FEATURES = [
     "observed_pressure_source",
     "observed_weather_code_at_as_of",
+    "observed_precip_intensity",
     "observed_observation_type",
     "observed_fetch_status",
 ]
@@ -135,6 +166,7 @@ BASELINE_METHODS = [
     "best_raw_provider",
 ]
 BASE_MODEL_METHODS = ["xgboost", "lightgbm", "catboost"]
+DEFAULT_BASE_MODEL_METHODS = tuple(BASE_MODEL_METHODS)
 STACK_METHOD = "ridge_stack"
 YEAR_SPLIT_SCOREBOARD_METHODS = (*BASE_MODEL_METHODS, STACK_METHOD, "hrrr_raw", "gfs_raw")
 YEAR_SPLIT_VALIDATION_WEIGHTS = {2024: 0.35, 2025: 0.65}
@@ -148,6 +180,126 @@ REQUIRED_MODEL_PACKAGES = {
     "catboost": "catboost",
     "optuna": "optuna",
 }
+V5_FEATURE_COLUMNS = [
+    "v2_recent_heat_anomaly_f",
+    "v2_recent_heat_momentum_f",
+    "v2_morning_warmup_to_consensus_f",
+    "v2_consensus_minus_7d_actual_f",
+    "v2_spread_per_warmup_f",
+    "v2_humidity_warmup_interaction",
+    "v3_high_so_far_above_current_f",
+    "v3_remaining_warmup_from_high_so_far_f",
+    "v3_high_so_far_minus_lag_1d_f",
+    "v3_high_so_far_minus_7d_actual_f",
+    "v3_remaining_warmup_per_spread_f",
+    "v3_humidity_remaining_warmup_interaction",
+    "v4_forecast_precip_total_mean_mm",
+    "v4_forecast_precip_total_max_mm",
+    "v4_forecast_precip_total_spread_mm",
+    "v4_forecast_precip_max_1h_mean_mm",
+    "v4_forecast_precip_hours_mean",
+    "v4_forecast_precip_intensity_mean",
+    "v4_forecast_precip_intensity_max",
+    "v4_any_forecast_precip",
+    "v4_all_forecast_precip",
+    "v4_observed_precip_any",
+    "v4_observed_precip_recent_mm_est",
+    "v4_forecast_total_minus_observed_recent_mm",
+    "v4_forecast_observed_precip_match",
+    "v4_forecast_wet_observed_dry",
+    "v4_observed_wet_forecast_dry",
+    "v4_precip_humidity_interaction",
+    "v4_precip_remaining_warmup_interaction",
+]
+V6_FEATURE_COLUMNS = [
+    *V5_FEATURE_COLUMNS,
+    "observed_temp_change_last_1h_f",
+    "observed_temp_change_last_3h_f",
+    "observed_morning_warmup_rate_f_per_hour",
+    "observed_high_so_far_change_since_9am_f",
+]
+V7_FEATURE_COLUMNS = V6_FEATURE_COLUMNS
+V8_FEATURE_COLUMNS = [
+    *V7_FEATURE_COLUMNS,
+    "v8_provider_max_remaining_from_high_so_far_f",
+    "v8_provider_min_remaining_from_high_so_far_f",
+    "v8_provider_median_remaining_from_high_so_far_f",
+    "v8_provider_spread_per_remaining_warmup_f",
+    "v8_month_remaining_warmup_mean_f",
+    "v8_month_remaining_warmup_count",
+    "v8_recent_remaining_warmup_7d_mean_f",
+    "v8_recent_remaining_warmup_30d_mean_f",
+    "v8_provider_mean_remaining_vs_month_normal_f",
+    "v8_cloud_cover_mean_remaining_warmup_interaction",
+    "v8_cloud_cover_max_remaining_warmup_interaction",
+    "v8_precip_total_remaining_warmup_interaction",
+    "v8_precip_max_1h_remaining_warmup_interaction",
+    "v8_wind_speed_mean_remaining_warmup_interaction",
+    "v8_wind_gust_max_remaining_warmup_interaction",
+    "v8_forecast_dewpoint_mean_f",
+    "v8_forecast_dewpoint_depression_mean_f",
+    "v8_dewpoint_mean_remaining_warmup_interaction",
+    "v8_dewpoint_depression_remaining_warmup_interaction",
+]
+V9_CLIMATOLOGY_FEATURE_COLUMNS = [
+    "climatology_high_10y_f",
+    "climatology_high_10y_std_f",
+    "climatology_high_10y_count",
+    "provider_mean_minus_climatology_10y_f",
+    "observed_temp_minus_climatology_10y_f",
+    "observed_high_so_far_minus_climatology_10y_f",
+]
+V9_FEATURE_COLUMNS = [
+    *V8_FEATURE_COLUMNS,
+    *V9_CLIMATOLOGY_FEATURE_COLUMNS,
+]
+V10_FEATURE_COLUMNS = V9_FEATURE_COLUMNS
+V11_FEATURE_COLUMNS = V9_FEATURE_COLUMNS
+V8_DROPPED_FEATURE_COLUMNS = {
+    "gfs_available",
+    "gfs_missing",
+    "hrrr_available",
+    "hrrr_missing",
+    "nbm_available",
+    "nbm_missing",
+    "provider_count_available",
+    "gfs_as_of_hour_local",
+    "hrrr_as_of_hour_local",
+    "nbm_as_of_hour_local",
+    "gfs_horizon_hours",
+    "hrrr_horizon_hours",
+    "nbm_horizon_hours",
+    "gfs_forecast_window_hours",
+    "hrrr_forecast_window_hours",
+    "nbm_forecast_window_hours",
+    "hrrr_forecast_hour_min",
+    "hrrr_forecast_hour_max",
+    "hrrr_forecast_lead_hours",
+    "gfs_issue_hour_utc",
+    "hrrr_issue_hour_local",
+    "hrrr_issue_hour_utc",
+    "nbm_issue_hour_local",
+    "nbm_issue_hour_utc",
+    "lat",
+    "lon",
+    "year",
+    "is_active_polymarket_station",
+    "gfs_grid_dist_km_mean",
+    "hrrr_grid_dist_km_mean",
+    "gfs_hrrr_grid_dist_km_mean_diff_f",
+    "gfs_hrrr_grid_dist_km_mean_abs_diff_f",
+    "observed_fetch_status",
+    "observed_observation_type",
+    "observed_pressure_source",
+}
+V9_DROPPED_FEATURE_COLUMNS = {
+    *V8_DROPPED_FEATURE_COLUMNS,
+    "climatology_source_start_year",
+    "climatology_source_end_year",
+    "actual_minus_climatology_10y_f_DIAGNOSTIC_ONLY",
+}
+V10_DROPPED_FEATURE_COLUMNS = V9_DROPPED_FEATURE_COLUMNS
+V11_DROPPED_FEATURE_COLUMNS = V9_DROPPED_FEATURE_COLUMNS
 
 
 @dataclass(frozen=True)
@@ -165,6 +317,19 @@ class StationStackingConfig:
     optuna_trials: int | None = None
     stack_optuna_trials: int | None = None
     optuna_verbose: bool = False
+    optuna_metric: str = "rmse_f"
+    optuna_startup_trials: int = 30
+    stack_optuna_startup_trials: int = 30
+    optuna_storage_path: str | Path | None = None
+    climatology_normals_path: str | Path | None = None
+    target_mode: str = TARGET_MODE_DIRECT_HIGH
+    feature_version: str = "base"
+    hyperparameter_space: str = "default"
+    base_model_methods: tuple[str, ...] = DEFAULT_BASE_MODEL_METHODS
+    stack_enabled: bool = True
+    year_split_folds: tuple[Any, ...] | None = None
+    year_split_test_train_years: tuple[int, int] = (2021, 2025)
+    year_split_test_year: int = 2026
     feature_importance_repeats: int | None = None
     output_dir: str | Path | None = None
 
@@ -175,6 +340,19 @@ class StationStackingConfig:
         if self.output_dir is not None:
             return Path(self.output_dir).resolve()
         return self.resolved_project_root() / "data" / "calibration" / "station_stacking"
+
+    def resolved_optuna_storage_path(self) -> Path | None:
+        if self.optuna_storage_path is not None:
+            return Path(self.optuna_storage_path).resolve()
+        if self.effective_feature_version in {"v6", "v7", "v8", "v9", "v10", "v11"}:
+            return self.resolved_output_dir() / f"{self.station_id.upper()}_optuna.sqlite3"
+        return None
+
+    def resolved_optuna_storage_uri(self) -> str | None:
+        path = self.resolved_optuna_storage_path()
+        if path is None:
+            return None
+        return f"sqlite:///{path.as_posix()}"
 
     @property
     def effective_min_train_rows(self) -> int:
@@ -199,6 +377,92 @@ class StationStackingConfig:
         if self.stack_optuna_trials is not None:
             return max(1, int(self.stack_optuna_trials))
         return 8 if self.fast_mode else min(self.effective_optuna_trials, 50)
+
+    @property
+    def effective_optuna_startup_trials(self) -> int:
+        return max(0, int(self.optuna_startup_trials))
+
+    @property
+    def effective_stack_optuna_startup_trials(self) -> int:
+        return max(0, int(self.stack_optuna_startup_trials))
+
+    @property
+    def effective_feature_version(self) -> str:
+        version = str(self.feature_version or "base").strip().lower()
+        if version in {"", "none"}:
+            version = "base"
+        if version not in {"base", "v5", "v6", "v7", "v8", "v9", "v10", "v11"}:
+            raise ValueError(
+                "feature_version must be one of: 'base', 'v5', 'v6', 'v7', 'v8', 'v9', 'v10', or 'v11'"
+            )
+        return version
+
+    @property
+    def effective_target_mode(self) -> str:
+        value = str(self.target_mode or TARGET_MODE_DIRECT_HIGH).strip().lower().replace("-", "_")
+        aliases = {
+            "direct": TARGET_MODE_DIRECT_HIGH,
+            "direct_high": TARGET_MODE_DIRECT_HIGH,
+            "high": TARGET_MODE_DIRECT_HIGH,
+            "actual": TARGET_MODE_DIRECT_HIGH,
+            "actual_high": TARGET_MODE_DIRECT_HIGH,
+            "remaining": TARGET_MODE_REMAINING_WARMUP,
+            "warmup": TARGET_MODE_REMAINING_WARMUP,
+            "remaining_warmup": TARGET_MODE_REMAINING_WARMUP,
+        }
+        mode = aliases.get(value, value)
+        if mode not in {TARGET_MODE_DIRECT_HIGH, TARGET_MODE_REMAINING_WARMUP}:
+            raise ValueError("target_mode must be one of: 'actual_high' or 'remaining_warmup'")
+        return mode
+
+    @property
+    def effective_hyperparameter_space(self) -> str:
+        value = str(self.hyperparameter_space or "default").strip().lower()
+        if value in {"", "normal", "standard"}:
+            value = "default"
+        if value not in {"default", "wide"}:
+            raise ValueError("hyperparameter_space must be one of: 'default' or 'wide'")
+        return value
+
+    @property
+    def effective_base_model_methods(self) -> tuple[str, ...]:
+        methods: list[str] = []
+        for raw_method in self.base_model_methods or ():
+            method = str(raw_method).strip().lower()
+            if not method:
+                continue
+            if method not in BASE_MODEL_METHODS:
+                raise ValueError(f"base_model_methods must be drawn from: {', '.join(BASE_MODEL_METHODS)}")
+            if method not in methods:
+                methods.append(method)
+        if not methods:
+            raise ValueError("base_model_methods must include at least one supported model method")
+        return tuple(methods)
+
+    @property
+    def effective_year_split_folds(self) -> tuple["YearSplitFold", ...]:
+        return tuple(self.year_split_folds) if self.year_split_folds is not None else YEAR_SPLIT_FOLDS
+
+    @property
+    def effective_year_split_test_train_years(self) -> tuple[int, int]:
+        return (int(self.year_split_test_train_years[0]), int(self.year_split_test_train_years[1]))
+
+    @property
+    def effective_year_split_test_year(self) -> int:
+        return int(self.year_split_test_year)
+
+    @property
+    def effective_optuna_metric(self) -> str:
+        aliases = {
+            "mae": "mae_f",
+            "mean_absolute_error": "mae_f",
+            "rmse": "rmse_f",
+            "root_mean_squared_error": "rmse_f",
+        }
+        metric = aliases.get(str(self.optuna_metric).strip().lower(), str(self.optuna_metric).strip().lower())
+        if metric not in {"mae_f", "rmse_f"}:
+            raise ValueError("optuna_metric must be one of: 'mae_f', 'mae', 'rmse_f', or 'rmse'")
+        return metric
 
     @property
     def effective_feature_importance_repeats(self) -> int:
@@ -247,29 +511,50 @@ YEAR_SPLIT_FOLDS = (
     YearSplitFold("fold_2021_2023_to_2024", 2021, 2023, 2024),
     YearSplitFold("fold_2022_2024_to_2025", 2022, 2024, 2025),
 )
+YEAR_SPLIT_EXPANDING_FOLDS = (
+    YearSplitFold("fold_2021_2023_to_2024", 2021, 2023, 2024),
+    YearSplitFold("fold_2021_2024_to_2025", 2021, 2024, 2025),
+)
 YEAR_SPLIT_TEST_TRAIN_YEARS = (2021, 2025)
 YEAR_SPLIT_TEST_YEAR = 2026
 
 
-def missing_model_dependencies() -> list[str]:
-    return sorted(package for package, module in REQUIRED_MODEL_PACKAGES.items() if find_spec(module) is None)
+def missing_model_dependencies(methods: Iterable[str] | None = None) -> list[str]:
+    if methods is None:
+        packages = REQUIRED_MODEL_PACKAGES
+    else:
+        requested = {str(method).strip().lower() for method in methods}
+        requested.add("optuna")
+        packages = {
+            package: module
+            for package, module in REQUIRED_MODEL_PACKAGES.items()
+            if package in requested
+        }
+    return sorted(package for package, module in packages.items() if find_spec(module) is None)
 
 
-def require_model_dependencies() -> None:
-    missing = missing_model_dependencies()
+def require_model_dependencies(methods: Iterable[str] | None = None) -> None:
+    missing = missing_model_dependencies(methods)
     if missing:
         missing_list = ", ".join(missing)
         raise ImportError(
-            "Station stacking ML requires xgboost, lightgbm, and catboost. "
+            "Station stacking ML requires the configured gradient boosting packages. "
             f"Missing: {missing_list}. Install them with: python -m pip install -r requirements.txt"
         )
 
 
-def missing_expected_model_methods(metrics: pd.DataFrame) -> list[str]:
+def missing_expected_model_methods(
+    metrics: pd.DataFrame,
+    base_model_methods: Iterable[str] | None = None,
+    stack_enabled: bool = True,
+) -> list[str]:
+    expected = [*(base_model_methods or BASE_MODEL_METHODS)]
+    if stack_enabled:
+        expected.append(STACK_METHOD)
     if metrics.empty or "method" not in metrics:
-        return [*BASE_MODEL_METHODS, STACK_METHOD]
+        return expected
     methods = set(metrics["method"].dropna().astype(str))
-    return [method for method in [*BASE_MODEL_METHODS, STACK_METHOD] if method not in methods]
+    return [method for method in expected if method not in methods]
 
 
 def provider_availability(
@@ -324,18 +609,54 @@ def load_current_observation_features(
     out["observed_fetch_status"] = out["observed_fetch_status"].astype("string").str.lower()
     if station_id is not None:
         out = out.loc[out["station_id"].eq(station_id.upper())].copy()
-    out = out.loc[out["timing_mode"].eq(timing_mode)].copy()
+    allowed_timing_modes = _current_observation_timing_modes(timing_mode)
+    out = out.loc[out["timing_mode"].isin(allowed_timing_modes)].copy()
     if out.empty:
         return pd.DataFrame(columns=["contract_date", *OBSERVED_NUMERIC_COLUMNS, *OBSERVED_TEXT_COLUMNS])
     for column in OBSERVED_NUMERIC_COLUMNS:
         out[column] = pd.to_numeric(out[column], errors="coerce")
+    out["_timing_match_rank"] = out["timing_mode"].ne(timing_mode).astype(int)
+    out["_observation_quality_rank"] = _current_observation_quality_rank(out)
     out = out.sort_values(
-        ["station_id", "contract_date", "source_cache_mtime", "source_cache_dir"],
-        ascending=[True, True, False, True],
+        [
+            "station_id",
+            "contract_date",
+            "_timing_match_rank",
+            "_observation_quality_rank",
+            "source_cache_mtime",
+            "source_cache_dir",
+        ],
+        ascending=[True, True, True, True, False, True],
     )
     out = out.drop_duplicates(["station_id", "contract_date"], keep="first")
     keep = ["contract_date", *OBSERVED_NUMERIC_COLUMNS, *OBSERVED_TEXT_COLUMNS]
     return out[keep].sort_values("contract_date").reset_index(drop=True)
+
+
+def _current_observation_timing_modes(timing_mode: str) -> tuple[str, ...]:
+    mode = str(timing_mode)
+    if mode == TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE:
+        return (TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE, TIMING_MODE_SAME_DAY_11AM)
+    return (mode,)
+
+
+def _current_observation_quality_rank(frame: pd.DataFrame) -> pd.Series:
+    status = frame["observed_fetch_status"].astype("string").str.strip().str.lower()
+    temp = pd.to_numeric(frame.get("observed_temp_at_as_of_f"), errors="coerce")
+    high = pd.to_numeric(frame.get("observed_high_temp_through_as_of_f"), errors="coerce")
+    age = pd.to_numeric(frame.get("observed_as_of_age_minutes"), errors="coerce")
+    as_of_text = frame.get("observed_as_of_time_local", pd.Series(pd.NA, index=frame.index)).astype("string")
+    clock = as_of_text.str.extract(r"T(?P<hour>\d{2}):(?P<minute>\d{2})")
+    local_minutes = pd.to_numeric(clock["hour"], errors="coerce") * 60 + pd.to_numeric(clock["minute"], errors="coerce")
+    in_window = local_minutes.between(10 * 60 + 50, 11 * 60 + 10)
+
+    return (
+        status.ne("ok").fillna(True).astype(int) * 100
+        + temp.isna().astype(int) * 20
+        + high.isna().astype(int) * 10
+        + age.gt(20).fillna(False).astype(int) * 5
+        + (~in_window.fillna(False)).astype(int) * 5
+    )
 
 
 def load_same_day_provider_forecasts(
@@ -387,6 +708,7 @@ def load_same_day_provider_forecasts(
     for column in PROVIDER_NUMERIC_COLUMNS:
         out[column] = pd.to_numeric(out[column], errors="coerce")
     out = out.dropna(subset=["station_id", "provider", "contract_date", "raw_forecast_high_f"])
+    out = out.loc[plausible_temperature_mask(out["raw_forecast_high_f"])].copy()
     if out.empty:
         return out
     out["_source_quality_rank"] = out["source_cache_dir"].map(_source_quality_rank)
@@ -411,9 +733,12 @@ def build_station_wide_dataset(
     station_id: str = "KATL",
     timing_mode: str = "same_day_11am",
     providers: tuple[str, ...] = TARGET_PROVIDERS,
+    feature_version: str = "base",
+    climatology_normals_path: str | Path | None = None,
 ) -> pd.DataFrame:
     root = Path(project_root)
     station_id = station_id.upper()
+    version = _normalize_feature_version(feature_version)
     actuals = _load_station_actuals(root, station_id)
     current_observations = load_current_observation_features(root, station_id, timing_mode=timing_mode)
     station_meta = _load_station_meta(root, station_id)
@@ -445,12 +770,23 @@ def build_station_wide_dataset(
     wide = _add_forecast_history_delta_features(wide, providers)
     wide = _add_observation_history_delta_features(wide)
     wide = _add_observation_forecast_delta_features(wide, providers)
+    wide = add_versioned_feature_engineering(wide, feature_version=version, providers=providers)
+    if version in {"v9", "v10", "v11"}:
+        wide = add_v9_climatology_features(
+            wide,
+            project_root=root,
+            station_id=station_id,
+            climatology_normals_path=climatology_normals_path,
+        )
+    wide = add_strict_quality_flags(wide, providers=providers)
     return wide
 
 
 def raw_baseline_predictions(frame: pd.DataFrame, config: StationStackingConfig) -> pd.DataFrame:
     rows: list[pd.DataFrame] = []
-    base = frame.dropna(subset=[TARGET]).copy()
+    frame = _with_actual_quality_columns(frame, config)
+    base = add_strict_quality_flags(frame, providers=config.providers)
+    base = base.loc[base[STRICT_QUALITY_OK_COLUMN].fillna(False)].dropna(subset=[TARGET]).copy()
     for provider in config.providers:
         column = HIGH_COLUMNS[provider]
         if column not in base:
@@ -497,10 +833,10 @@ def walk_forward_base_model_predictions(frame: pd.DataFrame, config: StationStac
         if len(train) < config.effective_min_train_rows or valid.empty:
             continue
         for method, estimator in models.items():
-            estimator.fit(train[feature_cols], train[TARGET])
+            estimator.fit(train[feature_cols], _model_target_values(train, config))
             pred = valid[["contract_date", TARGET]].copy()
             pred["method"] = method
-            pred["predicted_high_f"] = estimator.predict(valid[feature_cols])
+            pred["predicted_high_f"] = _prediction_output_to_high(estimator.predict(valid[feature_cols]), valid, config)
             pred["evaluation_scope"] = "walk_forward_model"
             rows.append(_prediction_columns(pred))
         completed_blocks += 1
@@ -514,9 +850,11 @@ def walk_forward_stack_predictions(
     baseline_predictions: pd.DataFrame,
     config: StationStackingConfig,
 ) -> pd.DataFrame:
+    if not config.stack_enabled:
+        return _empty_predictions()
     if base_predictions.empty or baseline_predictions.empty:
         return _empty_predictions()
-    stack_source = _stack_source_frame(base_predictions, baseline_predictions)
+    stack_source = _stack_source_frame(base_predictions, baseline_predictions, config.effective_base_model_methods)
     if stack_source.empty or len(stack_source) <= config.effective_min_meta_train_rows:
         return _empty_predictions()
 
@@ -524,7 +862,7 @@ def walk_forward_stack_predictions(
 
     baseline_methods = [f"{provider}_raw" for provider in config.providers]
     baseline_methods.extend(method for method in BASELINE_METHODS if not method.endswith("_raw"))
-    stack_features = [f"{method}_predicted_high_f" for method in [*BASE_MODEL_METHODS, *baseline_methods]]
+    stack_features = [f"{method}_predicted_high_f" for method in [*config.effective_base_model_methods, *baseline_methods]]
     if any(column not in stack_source for column in stack_features):
         return _empty_predictions()
     stack_source = stack_source.dropna(subset=stack_features + [TARGET]).sort_values("contract_date").reset_index(drop=True)
@@ -585,6 +923,8 @@ def run_station_stacking_experiment(config: StationStackingConfig) -> StationSta
         station_id=config.station_id,
         timing_mode=config.timing_mode,
         providers=config.providers,
+        feature_version=config.effective_feature_version,
+        climatology_normals_path=config.climatology_normals_path,
     )
     baseline_predictions = raw_baseline_predictions(features, config)
     model_predictions = walk_forward_base_model_predictions(features, config)
@@ -624,11 +964,16 @@ def run_station_stacking_experiment(config: StationStackingConfig) -> StationSta
 
 
 def run_station_year_split_experiment(config: StationStackingConfig) -> YearSplitExperimentResult:
+    folds = config.effective_year_split_folds
+    test_train_years = config.effective_year_split_test_train_years
+    test_year = config.effective_year_split_test_year
     features = build_station_wide_dataset(
         config.resolved_project_root(),
         station_id=config.station_id,
         timing_mode=config.timing_mode,
         providers=config.providers,
+        feature_version=config.effective_feature_version,
+        climatology_normals_path=config.climatology_normals_path,
     )
     modeling_frame, categorical, numeric = _modeling_frame(features, config)
     feature_columns_frame = pd.DataFrame(
@@ -636,13 +981,13 @@ def run_station_year_split_experiment(config: StationStackingConfig) -> YearSpli
         + [{"feature": feature, "kind": "numeric"} for feature in numeric]
     )
 
-    baseline_validation = year_split_baseline_predictions(modeling_frame, config, YEAR_SPLIT_FOLDS)
+    baseline_validation = year_split_baseline_predictions(modeling_frame, config, folds)
     tuning_results, validation_predictions, selected = tune_year_split_base_models(
         modeling_frame,
         config,
         categorical,
         numeric,
-        YEAR_SPLIT_FOLDS,
+        folds,
     )
     test_predictions = year_split_test_predictions(
         modeling_frame,
@@ -650,8 +995,8 @@ def run_station_year_split_experiment(config: StationStackingConfig) -> YearSpli
         categorical,
         numeric,
         selected,
-        train_years=YEAR_SPLIT_TEST_TRAIN_YEARS,
-        test_year=YEAR_SPLIT_TEST_YEAR,
+        train_years=test_train_years,
+        test_year=test_year,
     )
     test_stack_predictions, stack_tuning_results = tune_year_split_stack_model(
         validation_predictions=pd.concat(
@@ -662,7 +1007,7 @@ def run_station_year_split_experiment(config: StationStackingConfig) -> YearSpli
         else _empty_year_split_predictions(),
         test_predictions=test_predictions,
         config=config,
-        test_year=YEAR_SPLIT_TEST_YEAR,
+        test_year=test_year,
     )
     if not test_stack_predictions.empty:
         test_predictions = pd.concat([test_predictions, test_stack_predictions], ignore_index=True)
@@ -672,8 +1017,8 @@ def run_station_year_split_experiment(config: StationStackingConfig) -> YearSpli
         categorical,
         numeric,
         selected,
-        train_years=YEAR_SPLIT_TEST_TRAIN_YEARS,
-        test_year=YEAR_SPLIT_TEST_YEAR,
+        train_years=test_train_years,
+        test_year=test_year,
     )
     validation_predictions = pd.concat(
         [frame for frame in [baseline_validation, validation_predictions] if not frame.empty],
@@ -681,7 +1026,7 @@ def run_station_year_split_experiment(config: StationStackingConfig) -> YearSpli
     ) if not baseline_validation.empty or not validation_predictions.empty else _empty_year_split_predictions()
     metrics = summarize_year_split_predictions(validation_predictions, test_predictions)
     scoreboard = year_split_scoreboard(validation_predictions, test_predictions)
-    bracket_predictions = year_split_bracket_predictions(test_predictions, test_year=YEAR_SPLIT_TEST_YEAR)
+    bracket_predictions = year_split_bracket_predictions(test_predictions, test_year=test_year)
     bracket_metrics = year_split_bracket_metrics(bracket_predictions)
 
     output_dir = config.resolved_output_dir()
@@ -739,6 +1084,10 @@ def year_split_baseline_predictions(
     rows: list[pd.DataFrame] = []
     if frame.empty:
         return _empty_year_split_predictions()
+    frame = add_strict_quality_flags(_with_actual_quality_columns(frame, config), providers=config.providers)
+    frame = frame.loc[frame[STRICT_QUALITY_OK_COLUMN].fillna(False)].copy()
+    if frame.empty:
+        return _empty_year_split_predictions()
     year = pd.to_numeric(frame.get("year"), errors="coerce")
     for fold in folds:
         train = frame.loc[year.between(fold.train_start_year, fold.train_end_year)].copy()
@@ -768,15 +1117,37 @@ def tune_year_split_base_models(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     if frame.empty:
         return pd.DataFrame(), _empty_year_split_predictions(), pd.DataFrame()
+    frame = _ensure_model_target_columns(
+        add_strict_quality_flags(_with_actual_quality_columns(frame, config), providers=config.providers),
+        config,
+    )
+    frame = frame.loc[frame[STRICT_QUALITY_OK_COLUMN].fillna(False)].copy()
+    frame = _drop_missing_model_target(frame, config)
+    if frame.empty:
+        return pd.DataFrame(), _empty_year_split_predictions(), pd.DataFrame()
     rows: list[dict[str, Any]] = []
     year = pd.to_numeric(frame.get("year"), errors="coerce")
-    for method in BASE_MODEL_METHODS:
+    metric_col = config.effective_optuna_metric
+    for method in config.effective_base_model_methods:
         study = _create_optuna_study(config, method)
+        method_rows: list[dict[str, Any]] = []
 
         def objective(trial) -> float:
             params = _suggest_hyperparameters(method, trial, config)
             param_key = f"trial_{trial.number}"
             fold_scores: list[tuple[YearSplitFold, float]] = []
+            trial_rows: list[dict[str, Any]] = []
+            fit_records: list[dict[str, Any]] = []
+            _set_trial_checkpoint_attrs(
+                trial,
+                method=method,
+                param_key=param_key,
+                params=params,
+                rows=trial_rows,
+                fit_metadata=fit_records,
+                status="running",
+                error="",
+            )
             for fold in folds:
                 train = frame.loc[year.between(fold.train_start_year, fold.train_end_year)].copy()
                 valid = frame.loc[year.eq(fold.validation_year)].copy()
@@ -794,20 +1165,30 @@ def tune_year_split_base_models(
                         early_stopping=True,
                     )
                 except Exception as exc:  # noqa: BLE001
-                    rows.append(
-                        {
-                            "method": method,
-                            "trial_number": trial.number,
-                            "param_key": param_key,
-                            "fold": fold.name,
-                            "fold_weight": _year_split_fold_weight(fold),
-                            "mae_f": pd.NA,
-                            "rmse_f": pd.NA,
-                            "count": 0,
-                            "status": "failed",
-                            "error": str(exc),
-                            **{f"param_{key}": value for key, value in params.items()},
-                        }
+                    row = {
+                        "method": method,
+                        "trial_number": trial.number,
+                        "param_key": param_key,
+                        "fold": fold.name,
+                        "fold_weight": _year_split_fold_weight(fold),
+                        "mae_f": pd.NA,
+                        "rmse_f": pd.NA,
+                        "count": 0,
+                        "status": "failed",
+                        "error": str(exc),
+                        **{f"param_{key}": value for key, value in params.items()},
+                    }
+                    trial_rows.append(row)
+                    method_rows.append(row)
+                    _set_trial_checkpoint_attrs(
+                        trial,
+                        method=method,
+                        param_key=param_key,
+                        params=params,
+                        rows=trial_rows,
+                        fit_metadata=fit_records,
+                        status="failed",
+                        error=str(exc),
                     )
                     raise
                 pred = valid[["contract_date", TARGET]].copy()
@@ -819,37 +1200,86 @@ def tune_year_split_base_models(
                 metrics = _metric_row(_prediction_columns(pred))
                 mae = float(metrics["mae_f"])
                 rmse = float(metrics["rmse_f"])
-                fold_scores.append((fold, rmse))
-                rows.append(
-                    {
-                        "method": method,
-                        "trial_number": trial.number,
-                        "param_key": param_key,
-                        "fold": fold.name,
-                        "fold_weight": _year_split_fold_weight(fold),
-                        "mae_f": mae,
-                        "rmse_f": rmse,
-                        "count": int(metrics["count"]),
-                        "fit_numeric_features": fit_metadata["numeric_features"],
-                        "fit_categorical_features": fit_metadata["categorical_features"],
-                        "best_iteration": fit_metadata["best_iteration"],
-                        "status": "ok",
-                        "error": "",
-                        **{f"param_{key}": value for key, value in params.items()},
-                    }
-                )
+                fold_scores.append((fold, float(metrics[metric_col])))
+                row = {
+                    "method": method,
+                    "trial_number": trial.number,
+                    "param_key": param_key,
+                    "fold": fold.name,
+                    "fold_weight": _year_split_fold_weight(fold),
+                    "mae_f": mae,
+                    "rmse_f": rmse,
+                    "count": int(metrics["count"]),
+                    "fit_numeric_features": fit_metadata["numeric_features"],
+                    "fit_categorical_features": fit_metadata["categorical_features"],
+                    "best_iteration": fit_metadata["best_iteration"],
+                    "status": "ok",
+                    "error": "",
+                    **{f"param_{key}": value for key, value in params.items()},
+                }
+                trial_rows.append(row)
+                method_rows.append(row)
+                fit_records.append({"fold": fold.name, **fit_metadata})
                 current_score = _weighted_fold_score(fold_scores)
+                _set_trial_checkpoint_attrs(
+                    trial,
+                    method=method,
+                    param_key=param_key,
+                    params=params,
+                    rows=trial_rows,
+                    fit_metadata=fit_records,
+                    status="running",
+                    error="",
+                    objective_value=current_score,
+                )
                 if hasattr(trial, "report"):
                     trial.report(current_score, step=len(fold_scores))
                 if hasattr(trial, "should_prune") and trial.should_prune():
+                    _set_trial_checkpoint_attrs(
+                        trial,
+                        method=method,
+                        param_key=param_key,
+                        params=params,
+                        rows=trial_rows,
+                        fit_metadata=fit_records,
+                        status="pruned",
+                        error="",
+                        objective_value=current_score,
+                    )
                     raise _trial_pruned_exception()
             if not fold_scores:
+                _set_trial_checkpoint_attrs(
+                    trial,
+                    method=method,
+                    param_key=param_key,
+                    params=params,
+                    rows=trial_rows,
+                    fit_metadata=fit_records,
+                    status="failed",
+                    error="No usable validation folds.",
+                )
                 return float("inf")
-            return _weighted_fold_score(fold_scores)
+            final_score = _weighted_fold_score(fold_scores)
+            _set_trial_checkpoint_attrs(
+                trial,
+                method=method,
+                param_key=param_key,
+                params=params,
+                rows=trial_rows,
+                fit_metadata=fit_records,
+                status="ok",
+                error="",
+                objective_value=final_score,
+            )
+            return final_score
 
-        study.optimize(objective, n_trials=config.effective_optuna_trials, show_progress_bar=False, catch=(Exception,))
+        remaining_trials = _remaining_optuna_trials(study, config.effective_optuna_trials)
+        if remaining_trials > 0:
+            study.optimize(objective, n_trials=remaining_trials, show_progress_bar=False, catch=(Exception,))
+        stored_rows = _study_tuning_rows(study)
+        rows.extend(stored_rows if stored_rows else method_rows)
     tuning = pd.DataFrame(rows)
-    selected = _selected_hyperparameters(tuning)
+    selected = _selected_hyperparameters(tuning, metric_col=metric_col)
     validation_predictions = _validation_predictions_for_selected_params(frame, config, categorical, numeric, folds, selected)
     return tuning, validation_predictions, selected
 
@@ -863,6 +1293,14 @@ def year_split_test_predictions(
     train_years: tuple[int, int] = YEAR_SPLIT_TEST_TRAIN_YEARS,
     test_year: int = YEAR_SPLIT_TEST_YEAR,
 ) -> pd.DataFrame:
+    if frame.empty:
+        return _empty_year_split_predictions()
+    frame = _ensure_model_target_columns(
+        add_strict_quality_flags(_with_actual_quality_columns(frame, config), providers=config.providers),
+        config,
+    )
+    frame = frame.loc[frame[STRICT_QUALITY_OK_COLUMN].fillna(False)].copy()
+    frame = _drop_missing_model_target(frame, config)
     if frame.empty:
         return _empty_year_split_predictions()
     year = pd.to_numeric(frame.get("year"), errors="coerce")
@@ -927,9 +1365,11 @@ def tune_year_split_stack_model(
         "status",
         "error",
     ]
+    if not config.stack_enabled:
+        return _empty_year_split_predictions(), pd.DataFrame(columns=tuning_columns)
     if validation_predictions.empty or test_predictions.empty:
         return _empty_year_split_predictions(), pd.DataFrame(columns=tuning_columns)
-    stack_methods = list(STACK_FEATURE_SETS["models_plus_raw"])
+    stack_methods = [*config.effective_base_model_methods, "hrrr_raw", "gfs_raw"]
     train_source = _year_split_stack_source_frame(validation_predictions, stack_methods)
     test_source = _year_split_stack_source_frame(test_predictions, stack_methods)
     if train_source.empty or test_source.empty:
@@ -944,30 +1384,54 @@ def tune_year_split_stack_model(
     if meta_train.empty or meta_valid.empty:
         return _empty_year_split_predictions(), pd.DataFrame(columns=tuning_columns)
     study = _create_stack_optuna_study(config)
+    metric_col = config.effective_optuna_metric
 
     def objective(trial) -> float:
-        feature_set = trial.suggest_categorical("feature_set", list(STACK_FEATURE_SETS))
-        alpha = trial.suggest_float("alpha", 1e-4, 1e3, log=True)
-        fit_intercept = trial.suggest_categorical("fit_intercept", [True, False])
-        stack_features = _stack_features_for_set(feature_set)
+        params = _suggest_stack_hyperparameters(trial, config)
+        feature_set = str(params["feature_set"])
+        alpha = float(params["alpha"])
+        fit_intercept = bool(params["fit_intercept"])
+        stack_features = _stack_features_for_set(feature_set, config.effective_base_model_methods)
         train = meta_train.dropna(subset=[*stack_features, TARGET]).copy()
         valid = meta_valid.dropna(subset=[*stack_features, TARGET]).copy()
         param_key = f"stack_trial_{trial.number}"
+        fit_records = [{"stack_features": stack_features, "train_rows": int(len(train)), "valid_rows": int(len(valid))}]
+        trial_rows: list[dict[str, Any]] = []
+        _set_trial_checkpoint_attrs(
+            trial,
+            method=STACK_METHOD,
+            param_key=param_key,
+            params=params,
+            rows=trial_rows,
+            fit_metadata=fit_records,
+            status="running",
+            error="",
+        )
         if train.empty or valid.empty:
-            rows.append(
-                {
-                    "method": STACK_METHOD,
-                    "trial_number": trial.number,
-                    "param_key": param_key,
-                    "feature_set": feature_set,
-                    "alpha": alpha,
-                    "fit_intercept": fit_intercept,
-                    "mae_f": pd.NA,
-                    "rmse_f": pd.NA,
-                    "count": 0,
-                    "status": "failed",
-                    "error": "Missing complete stack train/validation rows.",
-                }
+            row = {
+                "method": STACK_METHOD,
+                "trial_number": trial.number,
+                "param_key": param_key,
+                "feature_set": feature_set,
+                "alpha": alpha,
+                "fit_intercept": fit_intercept,
+                "mae_f": pd.NA,
+                "rmse_f": pd.NA,
+                "count": 0,
+                "status": "failed",
+                "error": "Missing complete stack train/validation rows.",
+            }
+            rows.append(row)
+            trial_rows.append(row)
+            _set_trial_checkpoint_attrs(
+                trial,
+                method=STACK_METHOD,
+                param_key=param_key,
+                params=params,
+                rows=trial_rows,
+                fit_metadata=fit_records,
+                status="failed",
+                error="Missing complete stack train/validation rows.",
             )
             return float("inf")
         try:
@@ -975,20 +1439,30 @@ def tune_year_split_stack_model(
             model.fit(train[stack_features], train[TARGET])
             predicted = model.predict(valid[stack_features])
         except Exception as exc:  # noqa: BLE001
-            rows.append(
-                {
-                    "method": STACK_METHOD,
-                    "trial_number": trial.number,
-                    "param_key": param_key,
-                    "feature_set": feature_set,
-                    "alpha": alpha,
-                    "fit_intercept": fit_intercept,
-                    "mae_f": pd.NA,
-                    "rmse_f": pd.NA,
-                    "count": 0,
-                    "status": "failed",
-                    "error": str(exc),
-                }
+            row = {
+                "method": STACK_METHOD,
+                "trial_number": trial.number,
+                "param_key": param_key,
+                "feature_set": feature_set,
+                "alpha": alpha,
+                "fit_intercept": fit_intercept,
+                "mae_f": pd.NA,
+                "rmse_f": pd.NA,
+                "count": 0,
+                "status": "failed",
+                "error": str(exc),
+            }
+            rows.append(row)
+            trial_rows.append(row)
+            _set_trial_checkpoint_attrs(
+                trial,
+                method=STACK_METHOD,
+                param_key=param_key,
+                params=params,
+                rows=trial_rows,
+                fit_metadata=fit_records,
+                status="failed",
+                error=str(exc),
             )
             raise
         pred = valid[["contract_date", TARGET]].copy()
@@ -996,30 +1470,47 @@ def tune_year_split_stack_model(
         pred["predicted_high_f"] = predicted
         pred["evaluation_scope"] = "year_split_stack_validation"
         metrics = _metric_row(_prediction_columns(pred))
-        rows.append(
-            {
-                "method": STACK_METHOD,
-                "trial_number": trial.number,
-                "param_key": param_key,
-                "feature_set": feature_set,
-                "alpha": alpha,
-                "fit_intercept": fit_intercept,
-                "mae_f": float(metrics["mae_f"]),
-                "rmse_f": float(metrics["rmse_f"]),
-                "count": int(metrics["count"]),
-                "status": "ok",
-                "error": "",
-            }
+        row = {
+            "method": STACK_METHOD,
+            "trial_number": trial.number,
+            "param_key": param_key,
+            "feature_set": feature_set,
+            "alpha": alpha,
+            "fit_intercept": fit_intercept,
+            "mae_f": float(metrics["mae_f"]),
+            "rmse_f": float(metrics["rmse_f"]),
+            "count": int(metrics["count"]),
+            "status": "ok",
+            "error": "",
+        }
+        rows.append(row)
+        trial_rows.append(row)
+        objective_value = float(metrics[metric_col])
+        _set_trial_checkpoint_attrs(
+            trial,
+            method=STACK_METHOD,
+            param_key=param_key,
+            params=params,
+            rows=trial_rows,
+            fit_metadata=fit_records,
+            status="ok",
+            error="",
+            objective_value=objective_value,
         )
-        return float(metrics["rmse_f"])
+        return objective_value
 
-    study.optimize(objective, n_trials=config.effective_stack_optuna_trials, show_progress_bar=False, catch=(Exception,))
+    remaining_trials = _remaining_optuna_trials(study, config.effective_stack_optuna_trials)
+    if remaining_trials > 0:
+        study.optimize(objective, n_trials=remaining_trials, show_progress_bar=False, catch=(Exception,))
+    stored_rows = _study_tuning_rows(study)
+    if stored_rows:
+        rows = stored_rows
     tuning = pd.DataFrame(rows, columns=tuning_columns)
     ok = tuning.loc[tuning["status"].eq("ok")].copy()
     if ok.empty:
         return _empty_year_split_predictions(), tuning
-    selected = ok.sort_values(["rmse_f", "param_key"]).iloc[0]
-    stack_features = _stack_features_for_set(str(selected["feature_set"]))
+    selected = ok.sort_values([metric_col, "param_key"]).iloc[0]
+    stack_features = _stack_features_for_set(str(selected["feature_set"]), config.effective_base_model_methods)
     train = train_source.dropna(subset=[*stack_features, TARGET]).copy()
     test = test_source.dropna(subset=[*stack_features, TARGET]).copy()
     if len(train) < config.effective_min_meta_train_rows or test.empty:
@@ -1158,6 +1649,14 @@ def year_split_feature_importance(
     ]
     if frame.empty or selected_hyperparameters.empty:
         return pd.DataFrame(columns=columns)
+    frame = _ensure_model_target_columns(
+        add_strict_quality_flags(_with_actual_quality_columns(frame, config), providers=config.providers),
+        config,
+    )
+    frame = frame.loc[frame[STRICT_QUALITY_OK_COLUMN].fillna(False)].copy()
+    frame = _drop_missing_model_target(frame, config)
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
 
     from sklearn.inspection import permutation_importance
 
@@ -1177,12 +1676,12 @@ def year_split_feature_importance(
         params = _params_from_selected_row(row)
         estimator = _build_base_model_pipeline(config, fit_categorical, fit_numeric, method, params)
         try:
-            estimator.fit(train[feature_names], train[TARGET])
+            estimator.fit(train[feature_names], _model_target_values(train, config))
             importance = permutation_importance(
                 estimator,
                 test[feature_names],
                 test[TARGET],
-                scoring="neg_mean_absolute_error",
+                scoring=_high_prediction_mae_scorer(config, test),
                 n_repeats=config.effective_feature_importance_repeats,
                 random_state=config.random_state,
                 n_jobs=1,
@@ -1214,6 +1713,23 @@ def year_split_feature_importance(
     )
 
 
+def _high_prediction_mae_scorer(config: StationStackingConfig, frame: pd.DataFrame):
+    def scorer(estimator: Any, x: Any, y_true: Any) -> float:
+        if hasattr(x, "index"):
+            rows = frame.loc[x.index]
+            actual = pd.to_numeric(pd.Series(y_true, index=x.index), errors="coerce")
+        else:
+            rows = frame.iloc[: len(x)]
+            actual = pd.to_numeric(pd.Series(y_true), errors="coerce")
+        predicted_high = _prediction_output_to_high(estimator.predict(x), rows, config)
+        mask = actual.notna().to_numpy() & np.isfinite(predicted_high)
+        if not mask.any():
+            return float("-inf")
+        return -float(np.abs(actual.to_numpy(dtype=float)[mask] - predicted_high[mask]).mean())
+
+    return scorer
+
+
 def summarize_year_split_predictions(validation_predictions: pd.DataFrame, test_predictions: pd.DataFrame) -> pd.DataFrame:
     frames = []
     for predictions in [validation_predictions, test_predictions]:
@@ -1232,6 +1748,7 @@ def feature_columns(frame: pd.DataFrame, config: StationStackingConfig) -> tuple
     categorical = [column for column in ["day_of_week", *OBSERVED_CATEGORICAL_FEATURES] if column in frame]
     excluded = {
         TARGET,
+        REMAINING_WARMUP_TARGET,
         "contract_date",
         "station_id",
         "station_name",
@@ -1247,6 +1764,11 @@ def feature_columns(frame: pd.DataFrame, config: StationStackingConfig) -> tuple
         "observed_raw_metar",
         "observed_data_source",
         "observed_unavailable_reason",
+        "actual_source",
+        "actual_data_quality_flag",
+        "actual_raw_observation_count",
+        STRICT_QUALITY_OK_COLUMN,
+        STRICT_QUALITY_ISSUES_COLUMN,
     }
     excluded.update(column for column in frame.columns if column.endswith("_source_file_or_url"))
     excluded.update(column for column in frame.columns if column.endswith("_source_cache_dir"))
@@ -1258,6 +1780,25 @@ def feature_columns(frame: pd.DataFrame, config: StationStackingConfig) -> tuple
     excluded.update(column for column in frame.columns if column.endswith("_issued_at"))
     excluded.update(column for column in frame.columns if column.endswith("_forecast_window_start"))
     excluded.update(column for column in frame.columns if column.endswith("_forecast_window_end"))
+    version = config.effective_feature_version
+    if version not in {"v6", "v7", "v8", "v9", "v10", "v11"}:
+        excluded.update(
+            {
+                "observed_temp_change_last_1h_f",
+                "observed_temp_change_last_3h_f",
+                "observed_morning_warmup_rate_f_per_hour",
+                "observed_high_so_far_change_since_9am_f",
+            }
+        )
+    if version == "v8":
+        excluded.update(V8_DROPPED_FEATURE_COLUMNS)
+    if version == "v9":
+        excluded.update(V9_DROPPED_FEATURE_COLUMNS)
+    if version == "v10":
+        excluded.update(V10_DROPPED_FEATURE_COLUMNS)
+    if version == "v11":
+        excluded.update(V11_DROPPED_FEATURE_COLUMNS)
+    categorical = [column for column in categorical if column not in excluded]
 
     numeric: list[str] = []
     for column in frame.columns:
@@ -1303,10 +1844,23 @@ def _load_station_actuals(root: Path, station_id: str) -> pd.DataFrame:
     if missing:
         raise ValueError(f"{path} missing required columns: {sorted(missing)}")
     out = actuals.loc[actuals["station_code"].astype(str).str.upper().eq(station_id)].copy()
-    out = out.rename(columns={"date_local": "contract_date"})
+    out = out.rename(
+        columns={
+            "date_local": "contract_date",
+            "source": "actual_source",
+            "data_quality_flag": "actual_data_quality_flag",
+            "raw_observation_count": "actual_raw_observation_count",
+        }
+    )
     out["contract_date"] = out["contract_date"].astype(str).str[:10]
     out[TARGET] = pd.to_numeric(out[TARGET], errors="coerce")
-    return out[["contract_date", TARGET]].dropna(subset=["contract_date"]).sort_values("contract_date").reset_index(drop=True)
+    optional = ["actual_source", "actual_data_quality_flag", "actual_raw_observation_count"]
+    for column in optional:
+        if column not in out:
+            out[column] = pd.NA
+    out["actual_raw_observation_count"] = pd.to_numeric(out["actual_raw_observation_count"], errors="coerce")
+    keep = ["contract_date", TARGET, *optional]
+    return out[keep].dropna(subset=["contract_date"]).sort_values("contract_date").reset_index(drop=True)
 
 
 def _load_station_meta(root: Path, station_id: str) -> dict[str, Any]:
@@ -1324,6 +1878,30 @@ def _load_station_meta(root: Path, station_id: str) -> dict[str, Any]:
         if column in values:
             values[column] = pd.to_numeric(values[column], errors="coerce")
     return values
+
+
+def _with_actual_quality_columns(frame: pd.DataFrame, config: StationStackingConfig) -> pd.DataFrame:
+    quality_columns = ["actual_source", "actual_data_quality_flag", "actual_raw_observation_count"]
+    if frame.empty or "contract_date" not in frame or "station_id" not in frame:
+        return frame
+    if all(column in frame for column in quality_columns):
+        return frame
+    station = config.station_id.upper()
+    station_values = frame["station_id"].astype("string").str.upper().dropna().unique()
+    if len(station_values) and any(value != station for value in station_values):
+        return frame
+    try:
+        actuals = _load_station_actuals(config.resolved_project_root(), station)
+    except (FileNotFoundError, ValueError):
+        return frame
+    if actuals.empty:
+        return frame
+    quality = actuals[["contract_date", *quality_columns]].drop_duplicates("contract_date")
+    out = frame.copy()
+    merge_columns = ["contract_date", *[column for column in quality_columns if column not in out]]
+    if len(merge_columns) == 1:
+        return out
+    return out.merge(quality[merge_columns], on="contract_date", how="left")
 
 
 def _provider_wide(frame: pd.DataFrame, provider: str) -> pd.DataFrame:
@@ -1375,6 +1953,7 @@ def _add_current_observation_derived_features(frame: pd.DataFrame) -> pd.DataFra
     if "observed_temp_at_as_of_f" not in out:
         return out
     temp = pd.to_numeric(out.get("observed_temp_at_as_of_f"), errors="coerce")
+    high_temp = pd.to_numeric(out.get("observed_high_temp_through_as_of_f"), errors="coerce")
     dewpoint = pd.to_numeric(out.get("observed_dewpoint_at_as_of_f"), errors="coerce")
     humidity = pd.to_numeric(out.get("observed_humidity_at_as_of"), errors="coerce")
     wind_speed = pd.to_numeric(out.get("observed_wind_speed_at_as_of"), errors="coerce")
@@ -1383,22 +1962,43 @@ def _add_current_observation_derived_features(frame: pd.DataFrame) -> pd.DataFra
     precip_recent = pd.to_numeric(out.get("observed_precip_recent_at_as_of"), errors="coerce")
     weather_code = out.get("observed_weather_code_at_as_of")
     weather_text = weather_code.astype("string").str.upper() if weather_code is not None else pd.Series(pd.NA, index=out.index)
+    rain_code = weather_text.str.contains(r"(?:^|\s)[-+]?(?:RA|SHRA|TSRA|FZRA)\b", regex=True, na=False)
+    drizzle_code = weather_text.str.contains(r"(?:^|\s)[-+]?(?:DZ|FZDZ)\b", regex=True, na=False)
+    snow_code = weather_text.str.contains(r"(?:^|\s)[-+]?(?:SN|SHSN|BLSN)\b", regex=True, na=False)
+    precip_code = rain_code | drizzle_code | snow_code
+    light_precip_code = weather_text.str.contains(r"(?:^|\s)-(?:RA|SHRA|TSRA|FZRA|DZ|FZDZ|SN|SHSN)\b", regex=True, na=False)
+    heavy_precip_code = weather_text.str.contains(r"(?:^|\s)\+(?:RA|SHRA|TSRA|FZRA|DZ|FZDZ|SN|SHSN)\b", regex=True, na=False)
+    moderate_precip_code = precip_code & ~light_precip_code & ~heavy_precip_code
 
     out["observed_dewpoint_depression_f"] = temp - dewpoint
+    out["observed_high_temp_minus_temp_at_as_of_f"] = high_temp - temp
     out["observed_heat_index_at_as_of_f"] = _heat_index_f(temp, humidity)
     out["observed_wind_chill_at_as_of_f"] = _wind_chill_f(temp, wind_speed)
     radians = 2 * math.pi * wind_direction / 360
     out["observed_wind_dir_sin"] = np.sin(radians)
     out["observed_wind_dir_cos"] = np.cos(radians)
-    out["observed_is_raining_at_as_of"] = (
-        weather_text.str.contains(r"\b(?:RA|DZ|SH|TSRA|FZRA)\b", regex=True, na=False)
-        | precip_recent.fillna(0).gt(0)
-    )
+    out["observed_is_raining_at_as_of"] = rain_code | drizzle_code | precip_recent.fillna(0).gt(0)
+    out["observed_is_drizzle_at_as_of"] = drizzle_code
+    out["observed_is_snowing_at_as_of"] = snow_code
     out["observed_is_fog_or_mist_at_as_of"] = (
         weather_text.str.contains(r"\b(?:FG|BR|HZ)\b", regex=True, na=False)
         | visibility.le(3)
     )
     out["observed_is_thunder_at_as_of"] = weather_text.str.contains(r"\bTS\b|TSRA|VCTS", regex=True, na=False)
+    recent_precip = precip_recent.fillna(0)
+    intensity_code = np.select(
+        [
+            heavy_precip_code | recent_precip.ge(0.10),
+            moderate_precip_code | recent_precip.ge(0.03),
+            light_precip_code | precip_code | recent_precip.gt(0),
+        ],
+        [3, 2, 1],
+        default=0,
+    )
+    out["observed_precip_intensity_code"] = intensity_code
+    out["observed_precip_intensity"] = pd.Series(intensity_code, index=out.index).map(
+        {0: "none", 1: "light", 2: "moderate", 3: "heavy"}
+    )
     return out
 
 
@@ -1512,6 +2112,10 @@ def _add_provider_cross_model_features(frame: pd.DataFrame, providers: tuple[str
         "wind_speed_max": lambda provider: f"{provider}_wind_speed_max",
         "wind_gust_max": lambda provider: f"{provider}_wind_gust_max",
         "precip_amount": lambda provider: f"{provider}_precip_amount",
+        "forecast_precip_total_mm": lambda provider: f"{provider}_forecast_precip_total_mm",
+        "forecast_precip_max_1h_mm": lambda provider: f"{provider}_forecast_precip_max_1h_mm",
+        "forecast_precip_hours_count": lambda provider: f"{provider}_forecast_precip_hours_count",
+        "forecast_precip_intensity_code": lambda provider: f"{provider}_forecast_precip_intensity_code",
         "grid_dist_km_mean": lambda provider: f"{provider}_grid_dist_km_mean",
     }
     for left, right in provider_pairs:
@@ -1612,9 +2216,13 @@ def _add_observation_history_delta_features(frame: pd.DataFrame) -> pd.DataFrame
     if "observed_temp_at_as_of_f" not in out:
         return out
     observed_temp = pd.to_numeric(out["observed_temp_at_as_of_f"], errors="coerce")
+    observed_high_temp = pd.to_numeric(out.get("observed_high_temp_through_as_of_f"), errors="coerce")
     out["observed_temp_minus_actual_high_lag_1d_f"] = observed_temp - out.get("actual_high_lag_1d")
     out["observed_temp_minus_actual_high_roll_7d_mean_f"] = observed_temp - out.get("actual_high_roll_7d_mean")
     out["observed_temp_minus_actual_high_roll_30d_mean_f"] = observed_temp - out.get("actual_high_roll_30d_mean")
+    out["observed_high_temp_minus_actual_high_lag_1d_f"] = observed_high_temp - out.get("actual_high_lag_1d")
+    out["observed_high_temp_minus_actual_high_roll_7d_mean_f"] = observed_high_temp - out.get("actual_high_roll_7d_mean")
+    out["observed_high_temp_minus_actual_high_roll_30d_mean_f"] = observed_high_temp - out.get("actual_high_roll_30d_mean")
     if "observed_dewpoint_at_as_of_f" in out:
         dewpoint = pd.to_numeric(out["observed_dewpoint_at_as_of_f"], errors="coerce")
         out["observed_dewpoint_minus_actual_high_roll_7d_mean_f"] = dewpoint - out.get("actual_high_roll_7d_mean")
@@ -1624,6 +2232,7 @@ def _add_observation_history_delta_features(frame: pd.DataFrame) -> pd.DataFrame
 def _add_observation_forecast_delta_features(frame: pd.DataFrame, providers: tuple[str, ...]) -> pd.DataFrame:
     out = frame.copy()
     observed_temp = pd.to_numeric(out.get("observed_temp_at_as_of_f"), errors="coerce")
+    observed_high_temp = pd.to_numeric(out.get("observed_high_temp_through_as_of_f"), errors="coerce")
     observed_dewpoint = pd.to_numeric(out.get("observed_dewpoint_at_as_of_f"), errors="coerce")
     observed_humidity = pd.to_numeric(out.get("observed_humidity_at_as_of"), errors="coerce")
     observed_wind = pd.to_numeric(out.get("observed_wind_speed_at_as_of"), errors="coerce")
@@ -1632,6 +2241,9 @@ def _add_observation_forecast_delta_features(frame: pd.DataFrame, providers: tup
         high_col = HIGH_COLUMNS[provider]
         if high_col in out:
             out[f"{provider}_high_minus_observed_temp_f"] = pd.to_numeric(out[high_col], errors="coerce") - observed_temp
+            out[f"{provider}_high_minus_observed_high_temp_f"] = (
+                pd.to_numeric(out[high_col], errors="coerce") - observed_high_temp
+            )
         if f"{provider}_dewpoint_mean_f" in out:
             out[f"{provider}_dewpoint_minus_observed_dewpoint_f"] = (
                 pd.to_numeric(out[f"{provider}_dewpoint_mean_f"], errors="coerce") - observed_dewpoint
@@ -1649,6 +2261,296 @@ def _add_observation_forecast_delta_features(frame: pd.DataFrame, providers: tup
                 pd.to_numeric(out[f"{provider}_pressure_mslp_mean"], errors="coerce") - observed_pressure
             )
     return out
+
+
+def add_versioned_feature_engineering(
+    frame: pd.DataFrame,
+    *,
+    feature_version: str = "base",
+    providers: tuple[str, ...] = TARGET_PROVIDERS,
+) -> pd.DataFrame:
+    version = _normalize_feature_version(feature_version)
+    if version == "base":
+        return frame
+    out = add_v5_feature_engineering(frame, providers=providers)
+    if version in {"v8", "v9", "v10", "v11"}:
+        return add_v8_feature_engineering(out, providers=providers)
+    if version in {"v6", "v7"}:
+        return out
+    return out
+
+
+def add_v5_feature_engineering(frame: pd.DataFrame, providers: tuple[str, ...] = TARGET_PROVIDERS) -> pd.DataFrame:
+    out = frame.copy()
+    observed_temp = _numeric_series(out, "observed_temp_at_as_of_f")
+    high_so_far = _numeric_series(out, "observed_high_temp_through_as_of_f")
+    observed_humidity = _numeric_series(out, "observed_humidity_at_as_of")
+    provider_mean = _numeric_series(out, "provider_mean_high_f")
+    provider_spread = _numeric_series(out, "provider_spread_high_f")
+    lag_1d = _numeric_series(out, "actual_high_lag_1d")
+    roll_7d = _numeric_series(out, "actual_high_roll_7d_mean")
+    roll_30d = _numeric_series(out, "actual_high_roll_30d_mean")
+
+    warmup_to_consensus = provider_mean - observed_temp
+    remaining_warmup = provider_mean - high_so_far
+    out["v2_recent_heat_anomaly_f"] = lag_1d - roll_30d
+    out["v2_recent_heat_momentum_f"] = roll_7d - roll_30d
+    out["v2_morning_warmup_to_consensus_f"] = warmup_to_consensus
+    out["v2_consensus_minus_7d_actual_f"] = provider_mean - roll_7d
+    out["v2_spread_per_warmup_f"] = provider_spread / warmup_to_consensus.abs().clip(lower=1.0)
+    out["v2_humidity_warmup_interaction"] = (observed_humidity / 100.0) * warmup_to_consensus
+    out["v3_high_so_far_above_current_f"] = high_so_far - observed_temp
+    out["v3_remaining_warmup_from_high_so_far_f"] = remaining_warmup
+    out["v3_high_so_far_minus_lag_1d_f"] = high_so_far - lag_1d
+    out["v3_high_so_far_minus_7d_actual_f"] = high_so_far - roll_7d
+    out["v3_remaining_warmup_per_spread_f"] = remaining_warmup / provider_spread.abs().clip(lower=1.0)
+    out["v3_humidity_remaining_warmup_interaction"] = (observed_humidity / 100.0) * remaining_warmup
+
+    precip_total = _provider_matrix(out, providers, "forecast_precip_total_mm", fallback="precip_amount")
+    precip_max_1h = _provider_matrix(out, providers, "forecast_precip_max_1h_mm")
+    precip_hours = _provider_matrix(out, providers, "forecast_precip_hours_count")
+    precip_intensity = _provider_matrix(out, providers, "forecast_precip_intensity_code")
+    has_precip = _provider_matrix(out, providers, "forecast_has_precip").fillna(0).clip(lower=0, upper=1)
+
+    out["v4_forecast_precip_total_mean_mm"] = precip_total.mean(axis=1)
+    out["v4_forecast_precip_total_max_mm"] = precip_total.max(axis=1)
+    out["v4_forecast_precip_total_spread_mm"] = precip_total.max(axis=1) - precip_total.min(axis=1)
+    out["v4_forecast_precip_max_1h_mean_mm"] = precip_max_1h.mean(axis=1)
+    out["v4_forecast_precip_hours_mean"] = precip_hours.mean(axis=1)
+    out["v4_forecast_precip_intensity_mean"] = precip_intensity.mean(axis=1)
+    out["v4_forecast_precip_intensity_max"] = precip_intensity.max(axis=1)
+    out["v4_any_forecast_precip"] = has_precip.max(axis=1).fillna(0).astype(int)
+    out["v4_all_forecast_precip"] = has_precip.min(axis=1).fillna(0).astype(int)
+
+    observed_any = (
+        _boolean_numeric_series(out, "observed_is_raining_at_as_of")
+        | _boolean_numeric_series(out, "observed_is_drizzle_at_as_of")
+        | _boolean_numeric_series(out, "observed_is_snowing_at_as_of")
+    ).astype(int)
+    observed_recent_mm = _numeric_series(out, "observed_precip_recent_at_as_of") * 25.4
+    out["v4_observed_precip_any"] = observed_any
+    out["v4_observed_precip_recent_mm_est"] = observed_recent_mm
+    out["v4_forecast_total_minus_observed_recent_mm"] = out["v4_forecast_precip_total_mean_mm"] - observed_recent_mm
+    out["v4_forecast_observed_precip_match"] = out["v4_any_forecast_precip"].eq(observed_any).astype(int)
+    out["v4_forecast_wet_observed_dry"] = (out["v4_any_forecast_precip"].eq(1) & observed_any.eq(0)).astype(int)
+    out["v4_observed_wet_forecast_dry"] = (observed_any.eq(1) & out["v4_any_forecast_precip"].eq(0)).astype(int)
+    out["v4_precip_humidity_interaction"] = out["v4_forecast_precip_total_mean_mm"] * (observed_humidity / 100.0)
+    out["v4_precip_remaining_warmup_interaction"] = out["v4_forecast_precip_total_mean_mm"] * remaining_warmup
+    return out
+
+
+def add_v8_feature_engineering(frame: pd.DataFrame, providers: tuple[str, ...] = TARGET_PROVIDERS) -> pd.DataFrame:
+    out = frame.copy()
+    high_so_far = _numeric_series(out, "observed_high_temp_through_as_of_f")
+    provider_mean = _numeric_series(out, "provider_mean_high_f")
+    provider_max = _numeric_series(out, "provider_max_high_f")
+    provider_min = _numeric_series(out, "provider_min_high_f")
+    provider_median = _numeric_series(out, "provider_median_high_f")
+    provider_spread = _numeric_series(out, "provider_spread_high_f")
+    provider_mean_remaining = provider_mean - high_so_far
+
+    out["v8_provider_max_remaining_from_high_so_far_f"] = provider_max - high_so_far
+    out["v8_provider_min_remaining_from_high_so_far_f"] = provider_min - high_so_far
+    out["v8_provider_median_remaining_from_high_so_far_f"] = provider_median - high_so_far
+    out["v8_provider_spread_per_remaining_warmup_f"] = provider_spread / provider_mean_remaining.abs().clip(lower=1.0)
+
+    actual_remaining = _numeric_series(out, TARGET) - high_so_far
+    shifted_remaining = actual_remaining.shift(1)
+    month = pd.to_numeric(out.get("month"), errors="coerce")
+    out["v8_month_remaining_warmup_mean_f"] = actual_remaining.groupby(month, dropna=False).transform(
+        lambda series: series.shift(1).expanding(min_periods=2).mean()
+    )
+    out["v8_month_remaining_warmup_count"] = actual_remaining.groupby(month, dropna=False).transform(
+        lambda series: series.shift(1).expanding(min_periods=1).count()
+    )
+    out["v8_recent_remaining_warmup_7d_mean_f"] = shifted_remaining.rolling(7, min_periods=2).mean()
+    out["v8_recent_remaining_warmup_30d_mean_f"] = shifted_remaining.rolling(30, min_periods=5).mean()
+    out["v8_provider_mean_remaining_vs_month_normal_f"] = (
+        provider_mean_remaining - out["v8_month_remaining_warmup_mean_f"]
+    )
+
+    cloud_mean = _provider_matrix(out, providers, "cloud_cover_mean")
+    cloud_max = _provider_matrix(out, providers, "cloud_cover_max")
+    precip_total = _provider_matrix(out, providers, "forecast_precip_total_mm", fallback="precip_amount")
+    precip_max_1h = _provider_matrix(out, providers, "forecast_precip_max_1h_mm")
+    wind_speed = _provider_matrix(out, providers, "wind_speed_mean")
+    wind_gust = _provider_matrix(out, providers, "wind_gust_max")
+    dewpoint = _provider_matrix(out, providers, "dewpoint_mean_f")
+
+    cloud_mean_avg = cloud_mean.mean(axis=1)
+    cloud_max_avg = cloud_max.mean(axis=1)
+    precip_total_avg = precip_total.mean(axis=1)
+    precip_max_1h_avg = precip_max_1h.mean(axis=1)
+    wind_speed_avg = wind_speed.mean(axis=1)
+    wind_gust_avg = wind_gust.mean(axis=1)
+    dewpoint_avg = dewpoint.mean(axis=1)
+    dewpoint_depression = provider_mean - dewpoint_avg
+
+    out["v8_cloud_cover_mean_remaining_warmup_interaction"] = (cloud_mean_avg / 100.0) * provider_mean_remaining
+    out["v8_cloud_cover_max_remaining_warmup_interaction"] = (cloud_max_avg / 100.0) * provider_mean_remaining
+    out["v8_precip_total_remaining_warmup_interaction"] = precip_total_avg * provider_mean_remaining
+    out["v8_precip_max_1h_remaining_warmup_interaction"] = precip_max_1h_avg * provider_mean_remaining
+    out["v8_wind_speed_mean_remaining_warmup_interaction"] = wind_speed_avg * provider_mean_remaining
+    out["v8_wind_gust_max_remaining_warmup_interaction"] = wind_gust_avg * provider_mean_remaining
+    out["v8_forecast_dewpoint_mean_f"] = dewpoint_avg
+    out["v8_forecast_dewpoint_depression_mean_f"] = dewpoint_depression
+    out["v8_dewpoint_mean_remaining_warmup_interaction"] = dewpoint_avg * provider_mean_remaining
+    out["v8_dewpoint_depression_remaining_warmup_interaction"] = dewpoint_depression * provider_mean_remaining
+    return out
+
+
+def add_v9_climatology_features(
+    frame: pd.DataFrame,
+    *,
+    project_root: str | Path = ".",
+    station_id: str | None = None,
+    climatology_normals_path: str | Path | None = None,
+) -> pd.DataFrame:
+    out = frame.copy()
+    normals_path = _resolve_v9_climatology_normals_path(project_root, climatology_normals_path)
+    normals = _load_v9_climatology_normals(normals_path)
+    station = str(station_id or "").upper()
+    if not station and "station_code" in out and out["station_code"].notna().any():
+        station = str(out["station_code"].dropna().astype("string").iloc[0]).upper()
+
+    dates = pd.to_datetime(out["contract_date"], errors="coerce")
+    station_codes = (
+        out["station_code"].astype("string").str.upper()
+        if "station_code" in out
+        else pd.Series(station, index=out.index, dtype="string")
+    )
+    join_keys = pd.DataFrame(
+        {
+            "_v9_row_id": out.index,
+            "station_code": station_codes.fillna(station),
+            "target_year": dates.dt.year.astype("Int64"),
+            "month_day": dates.dt.strftime("%m-%d"),
+        },
+        index=out.index,
+    )
+    normal_columns = [
+        "station_code",
+        "target_year",
+        "month_day",
+        "climatology_high_10y_f",
+        "climatology_high_10y_std_f",
+        "climatology_high_10y_count",
+        "climatology_source_start_year",
+        "climatology_source_end_year",
+    ]
+    joined = join_keys.merge(normals[normal_columns], on=["station_code", "target_year", "month_day"], how="left")
+    joined = joined.set_index("_v9_row_id").reindex(out.index)
+
+    for column in normal_columns[3:]:
+        out[column] = joined[column]
+
+    climatology = pd.to_numeric(out["climatology_high_10y_f"], errors="coerce")
+    out["provider_mean_minus_climatology_10y_f"] = _numeric_series(out, "provider_mean_high_f") - climatology
+    out["observed_temp_minus_climatology_10y_f"] = _numeric_series(out, "observed_temp_at_as_of_f") - climatology
+    out["observed_high_so_far_minus_climatology_10y_f"] = (
+        _numeric_series(out, "observed_high_temp_through_as_of_f") - climatology
+    )
+    out["actual_minus_climatology_10y_f_DIAGNOSTIC_ONLY"] = _numeric_series(out, TARGET) - climatology
+    return out
+
+
+def _resolve_v9_climatology_normals_path(
+    project_root: str | Path,
+    climatology_normals_path: str | Path | None,
+) -> Path:
+    if climatology_normals_path is not None:
+        path = Path(climatology_normals_path)
+        return path.resolve() if path.is_absolute() else (Path(project_root) / path).resolve()
+    root = Path(project_root)
+    candidates = [
+        root / "data" / "calibration" / "station_stacking_v9" / "station_rolling_10y_daily_high_normals.csv",
+        root / "outputs" / "climatology_all_stations" / "station_rolling_10y_daily_high_normals.csv",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path.resolve()
+    raise FileNotFoundError(
+        "V9 climatology normals not found. Expected one of: "
+        + ", ".join(str(path) for path in candidates)
+    )
+
+
+def _load_v9_climatology_normals(path: Path) -> pd.DataFrame:
+    normals = pd.read_csv(path)
+    required = {
+        "station_code",
+        "target_year",
+        "month_day",
+        "climatology_high_10y_f",
+        "climatology_high_10y_std_f",
+        "climatology_high_10y_count",
+        "climatology_source_start_year",
+        "climatology_source_end_year",
+    }
+    missing = sorted(required - set(normals.columns))
+    if missing:
+        raise ValueError(f"V9 climatology normals missing required columns: {', '.join(missing)}")
+    normals = normals.copy()
+    normals["station_code"] = normals["station_code"].astype("string").str.upper()
+    normals["target_year"] = pd.to_numeric(normals["target_year"], errors="coerce").astype("Int64")
+    normals["month_day"] = normals["month_day"].astype("string")
+    for column in required - {"station_code", "target_year", "month_day"}:
+        normals[column] = pd.to_numeric(normals[column], errors="coerce")
+    return normals
+
+
+def _normalize_feature_version(feature_version: str) -> str:
+    version = str(feature_version or "base").strip().lower()
+    if version in {"", "none"}:
+        version = "base"
+    if version not in {"base", "v5", "v6", "v7", "v8", "v9", "v10", "v11"}:
+        raise ValueError(
+            "feature_version must be one of: 'base', 'v5', 'v6', 'v7', 'v8', 'v9', 'v10', or 'v11'"
+        )
+    return version
+
+
+def _numeric_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column in frame:
+        return pd.to_numeric(frame[column], errors="coerce")
+    return pd.Series(np.nan, index=frame.index, dtype="float64")
+
+
+def _boolean_numeric_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column not in frame:
+        return pd.Series(0, index=frame.index, dtype="int64")
+    series = frame[column]
+    if pd.api.types.is_bool_dtype(series):
+        return series.fillna(False).astype(int)
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce").fillna(0).gt(0).astype(int)
+    return series.astype("string").str.lower().isin({"1", "true", "yes", "y"}).astype(int)
+
+
+def _provider_matrix(
+    frame: pd.DataFrame,
+    providers: tuple[str, ...],
+    primary: str,
+    fallback: str | None = None,
+) -> pd.DataFrame:
+    return pd.DataFrame(
+        {provider: _provider_feature_series(frame, provider, primary, fallback) for provider in providers},
+        index=frame.index,
+    )
+
+
+def _provider_feature_series(
+    frame: pd.DataFrame,
+    provider: str,
+    primary: str,
+    fallback: str | None,
+) -> pd.Series:
+    primary_column = f"{provider}_{primary}"
+    if primary_column in frame:
+        return _numeric_series(frame, primary_column)
+    if fallback is not None:
+        return _numeric_series(frame, f"{provider}_{fallback}")
+    return pd.Series(np.nan, index=frame.index, dtype="float64")
 
 
 def _prediction_columns(frame: pd.DataFrame) -> pd.DataFrame:
@@ -1697,13 +2599,66 @@ def _walk_forward_best_raw_provider(frame: pd.DataFrame, config: StationStacking
 
 
 def _modeling_frame(frame: pd.DataFrame, config: StationStackingConfig) -> tuple[pd.DataFrame, list[str], list[str]]:
+    frame = _ensure_model_target_columns(_with_actual_quality_columns(frame, config), config)
+    frame = add_strict_quality_flags(frame, providers=config.providers)
     categorical, numeric = feature_columns(frame, config)
-    required = [TARGET, *[HIGH_COLUMNS[provider] for provider in config.providers]]
+    frame = _drop_missing_model_target(frame, config)
+    if frame.empty:
+        return frame, categorical, numeric
+    required = [HIGH_COLUMNS[provider] for provider in config.providers]
     clean = frame.dropna(subset=required).loc[frame["all_provider_highs_available"].fillna(False)].copy()
+    clean = clean.loc[clean[STRICT_QUALITY_OK_COLUMN].fillna(False)].copy()
     clean = clean.sort_values("contract_date").reset_index(drop=True)
     numeric = [column for column in numeric if column in clean and clean[column].notna().any()]
     categorical = [column for column in categorical if column in clean]
     return clean, categorical, numeric
+
+
+def _ensure_model_target_columns(frame: pd.DataFrame, config: StationStackingConfig) -> pd.DataFrame:
+    out = frame.copy()
+    if config.effective_target_mode != TARGET_MODE_REMAINING_WARMUP:
+        return out
+    actual = pd.to_numeric(out.get(TARGET), errors="coerce")
+    high_so_far = pd.to_numeric(out.get(OBSERVED_HIGH_SO_FAR_COLUMN), errors="coerce")
+    out[REMAINING_WARMUP_TARGET] = actual - high_so_far
+    return out
+
+
+def _drop_missing_model_target(frame: pd.DataFrame, config: StationStackingConfig) -> pd.DataFrame:
+    required = _unique_columns([TARGET, *_model_target_required_columns(config)])
+    if any(column not in frame for column in required):
+        return frame.iloc[0:0].copy()
+    return frame.dropna(subset=required).copy()
+
+
+def _model_target_column(config: StationStackingConfig) -> str:
+    if config.effective_target_mode == TARGET_MODE_REMAINING_WARMUP:
+        return REMAINING_WARMUP_TARGET
+    return TARGET
+
+
+def _model_target_required_columns(config: StationStackingConfig) -> list[str]:
+    if config.effective_target_mode == TARGET_MODE_REMAINING_WARMUP:
+        return [OBSERVED_HIGH_SO_FAR_COLUMN, REMAINING_WARMUP_TARGET]
+    return [TARGET]
+
+
+def _model_target_values(frame: pd.DataFrame, config: StationStackingConfig) -> pd.Series:
+    frame = _ensure_model_target_columns(frame, config)
+    return pd.to_numeric(frame[_model_target_column(config)], errors="coerce")
+
+
+def _prediction_output_to_high(predicted: Any, frame: pd.DataFrame, config: StationStackingConfig) -> np.ndarray:
+    predicted_array = np.asarray(predicted, dtype=float)
+    if config.effective_target_mode != TARGET_MODE_REMAINING_WARMUP:
+        return predicted_array
+    high_so_far = pd.to_numeric(frame[OBSERVED_HIGH_SO_FAR_COLUMN], errors="coerce").to_numpy(dtype=float)
+    predicted_high = high_so_far + predicted_array
+    return np.maximum(predicted_high, high_so_far)
+
+
+def _unique_columns(columns: list[str]) -> list[str]:
+    return list(dict.fromkeys(columns))
 
 
 def _build_base_model_pipelines(
@@ -1713,7 +2668,7 @@ def _build_base_model_pipelines(
 ) -> dict[str, Any]:
     return {
         method: _build_base_model_pipeline(config, categorical, numeric, method, params={})
-        for method in BASE_MODEL_METHODS
+        for method in config.effective_base_model_methods
     }
 
 
@@ -1724,11 +2679,10 @@ def _build_base_model_pipeline(
     method: str,
     params: dict[str, Any],
 ):
-    require_model_dependencies()
     try:
         from sklearn.pipeline import Pipeline
     except ImportError as exc:
-        raise ImportError("Station stacking notebooks need scikit-learn and the gradient boosting packages.") from exc
+        raise ImportError("Station stacking notebooks need scikit-learn.") from exc
 
     return Pipeline(
         [
@@ -1771,19 +2725,16 @@ def _build_base_model_estimator(
     params: dict[str, Any],
     early_stopping_rounds: int | None = None,
 ):
-    require_model_dependencies()
-    try:
-        from catboost import CatBoostRegressor
-        from lightgbm import LGBMRegressor
-        from xgboost import XGBRegressor
-    except ImportError as exc:
-        raise ImportError("Station stacking notebooks need the gradient boosting packages.") from exc
-
     n_estimators = int(params.get("n_estimators", 120 if config.fast_mode else 900))
     cat_iterations = int(params.get("iterations", 120 if config.fast_mode else 900))
     if method == "xgboost":
+        try:
+            from xgboost import XGBRegressor
+        except ImportError as exc:
+            raise ImportError("Station stacking xgboost models need xgboost.") from exc
+        robust_objective = config.effective_feature_version == "v11"
         estimator_params = {
-            "objective": "reg:squarederror",
+            "objective": "reg:pseudohubererror" if robust_objective else "reg:squarederror",
             "n_estimators": n_estimators,
             "learning_rate": float(params.get("learning_rate", 0.035)),
             "max_depth": int(params.get("max_depth", 3)),
@@ -1795,44 +2746,64 @@ def _build_base_model_estimator(
             "reg_lambda": float(params.get("reg_lambda", 1.0)),
             "random_state": config.random_state,
             "n_jobs": -1,
-            "eval_metric": "rmse",
+            "eval_metric": "mae" if robust_objective else "rmse",
         }
         if early_stopping_rounds is not None:
             estimator_params["early_stopping_rounds"] = early_stopping_rounds
         return XGBRegressor(**estimator_params)
     if method == "lightgbm":
-        return LGBMRegressor(
-            n_estimators=n_estimators,
-            learning_rate=float(params.get("learning_rate", 0.035)),
-            num_leaves=int(params.get("num_leaves", 31)),
-            max_depth=int(params.get("max_depth", -1)),
-            min_child_samples=int(params.get("min_child_samples", 20)),
-            min_split_gain=float(params.get("min_split_gain", 0.0)),
-            bagging_fraction=float(params.get("bagging_fraction", params.get("subsample", 0.9))),
-            bagging_freq=int(params.get("bagging_freq", 1)),
-            feature_fraction=float(params.get("feature_fraction", params.get("colsample_bytree", 0.9))),
-            lambda_l1=float(params.get("lambda_l1", params.get("reg_alpha", 0.0))),
-            lambda_l2=float(params.get("lambda_l2", params.get("reg_lambda", 0.0))),
-            random_state=config.random_state,
-            n_jobs=-1,
-            verbose=-1,
-        )
+        try:
+            from lightgbm import LGBMRegressor
+        except ImportError as exc:
+            raise ImportError("Station stacking lightgbm models need lightgbm.") from exc
+        estimator_params = {
+            "n_estimators": n_estimators,
+            "learning_rate": float(params.get("learning_rate", 0.035)),
+            "num_leaves": int(params.get("num_leaves", 31)),
+            "max_depth": int(params.get("max_depth", -1)),
+            "min_child_samples": int(params.get("min_child_samples", 20)),
+            "min_split_gain": float(params.get("min_split_gain", 0.0)),
+            "bagging_fraction": float(params.get("bagging_fraction", params.get("subsample", 0.9))),
+            "bagging_freq": int(params.get("bagging_freq", 1)),
+            "feature_fraction": float(params.get("feature_fraction", params.get("colsample_bytree", 0.9))),
+            "lambda_l1": float(params.get("lambda_l1", params.get("reg_alpha", 0.0))),
+            "lambda_l2": float(params.get("lambda_l2", params.get("reg_lambda", 0.0))),
+            "random_state": config.random_state,
+            "n_jobs": -1,
+            "verbose": -1,
+        }
+        if config.effective_feature_version == "v11":
+            estimator_params["objective"] = "huber"
+            estimator_params["metric"] = "mae"
+            estimator_params["alpha"] = float(params.get("huber_alpha", 0.9))
+        return LGBMRegressor(**estimator_params)
     if method == "catboost":
-        return CatBoostRegressor(
-            iterations=cat_iterations,
-            learning_rate=float(params.get("learning_rate", 0.035)),
-            depth=int(params.get("depth", 6)),
-            l2_leaf_reg=float(params.get("l2_leaf_reg", 3.0)),
-            random_strength=float(params.get("random_strength", 1.0)),
-            bagging_temperature=float(params.get("bagging_temperature", 1.0)),
-            border_count=int(params.get("border_count", 128)),
-            rsm=float(params.get("rsm", 1.0)),
-            bootstrap_type="Bayesian",
-            loss_function="RMSE",
-            random_seed=config.random_state,
-            verbose=False,
-            allow_writing_files=False,
-        )
+        try:
+            from catboost import CatBoostRegressor
+        except ImportError as exc:
+            raise ImportError("Station stacking catboost models need catboost.") from exc
+        cat_params = {
+            "iterations": cat_iterations,
+            "learning_rate": float(params.get("learning_rate", 0.035)),
+            "depth": int(params.get("depth", 6)),
+            "l2_leaf_reg": float(params.get("l2_leaf_reg", 3.0)),
+            "random_strength": float(params.get("random_strength", 1.0)),
+            "bagging_temperature": float(params.get("bagging_temperature", 1.0)),
+            "border_count": int(params.get("border_count", 128)),
+            "rsm": float(params.get("rsm", 1.0)),
+            "bootstrap_type": "Bayesian",
+            "loss_function": str(params.get("loss_function", "RMSE")),
+            "random_seed": config.random_state,
+            "verbose": False,
+            "allow_writing_files": False,
+        }
+        if config.effective_feature_version in {"v10", "v11"}:
+            huber_delta = float(params.get("huber_delta", 1.0))
+            cat_params["loss_function"] = f"Huber:delta={huber_delta:g}"
+            cat_params["eval_metric"] = "MAE"
+        elif "eval_metric" in params:
+            cat_params["eval_metric"] = str(params["eval_metric"])
+        return CatBoostRegressor(**cat_params)
     raise ValueError(f"Unknown base model method: {method}")
 
 
@@ -1846,6 +2817,8 @@ def _fit_predict_base_model(
     valid: pd.DataFrame,
     early_stopping: bool,
 ) -> tuple[np.ndarray, dict[str, Any]]:
+    train = _ensure_model_target_columns(train, config)
+    valid = _ensure_model_target_columns(valid, config)
     fit_categorical, fit_numeric = _fit_feature_columns(train, categorical, numeric)
     feature_names = [*fit_categorical, *fit_numeric]
     if not feature_names:
@@ -1854,8 +2827,8 @@ def _fit_predict_base_model(
     preprocessor = _build_preprocessor(fit_categorical, fit_numeric)
     x_train = preprocessor.fit_transform(train[feature_names])
     x_valid = preprocessor.transform(valid[feature_names])
-    y_train = pd.to_numeric(train[TARGET], errors="coerce")
-    y_valid = pd.to_numeric(valid[TARGET], errors="coerce")
+    y_train = _model_target_values(train, config)
+    y_valid = _model_target_values(valid, config)
     early_stopping_rounds = _early_stopping_rounds(config) if early_stopping else None
     estimator = _build_base_model_estimator(config, method, params, early_stopping_rounds=early_stopping_rounds)
     _fit_base_estimator(
@@ -1871,8 +2844,10 @@ def _fit_predict_base_model(
         "numeric_features": ",".join(fit_numeric),
         "categorical_features": ",".join(fit_categorical),
         "best_iteration": _best_iteration(estimator),
+        "target_mode": config.effective_target_mode,
+        "model_target": _model_target_column(config),
     }
-    return np.asarray(estimator.predict(x_valid), dtype=float), metadata
+    return _prediction_output_to_high(estimator.predict(x_valid), valid, config), metadata
 
 
 def _fit_feature_columns(train: pd.DataFrame, categorical: list[str], numeric: list[str]) -> tuple[list[str], list[str]]:
@@ -1899,12 +2874,18 @@ def _fit_base_estimator(
             return
         if method == "lightgbm":
             import lightgbm as lgb
+            eval_metric = "rmse"
+            get_params = getattr(estimator, "get_params", None)
+            if callable(get_params):
+                metric = get_params().get("metric")
+                if isinstance(metric, str) and metric:
+                    eval_metric = metric
 
             estimator.fit(
                 x_train,
                 y_train,
                 eval_set=[(x_valid, y_valid)],
-                eval_metric="rmse",
+                eval_metric=eval_metric,
                 callbacks=[lgb.early_stopping(early_stopping_rounds, verbose=False)],
             )
             return
@@ -1968,8 +2949,15 @@ def _create_stack_optuna_study(config: StationStackingConfig):
     import optuna
 
     optuna.logging.set_verbosity(optuna.logging.INFO if config.optuna_verbose else optuna.logging.WARNING)
-    sampler = optuna.samplers.TPESampler(seed=config.random_state + 1000)
-    return optuna.create_study(direction="minimize", sampler=sampler)
+    sampler = optuna.samplers.TPESampler(
+        seed=config.random_state + 1000,
+        n_startup_trials=config.effective_stack_optuna_startup_trials,
+    )
+    return optuna.create_study(
+        direction="minimize",
+        sampler=sampler,
+        **_optuna_study_storage_kwargs(config, stage="stack", method=STACK_METHOD),
+    )
 
 
 def _stack_meta_train_valid_split(stack_source: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -1985,72 +2973,213 @@ def _stack_meta_train_valid_split(stack_source: pd.DataFrame) -> tuple[pd.DataFr
     return ordered.iloc[:split_at].copy(), ordered.iloc[split_at:].copy()
 
 
-def _stack_features_for_set(feature_set: str) -> list[str]:
-    methods = STACK_FEATURE_SETS.get(feature_set)
-    if methods is None:
+def _stack_features_for_set(
+    feature_set: str,
+    base_model_methods: Iterable[str] | None = None,
+) -> list[str]:
+    if feature_set not in STACK_FEATURE_SETS:
         raise ValueError(f"Unknown stack feature set: {feature_set}")
+    base_methods = tuple(base_model_methods or BASE_MODEL_METHODS)
+    if feature_set == "models_only":
+        methods = base_methods
+    else:
+        methods = (*base_methods, "hrrr_raw", "gfs_raw")
     return [f"{method}_predicted_high_f" for method in methods]
+
+
+def _suggest_stack_hyperparameters(trial, config: StationStackingConfig) -> dict[str, Any]:
+    if config.effective_hyperparameter_space == "wide":
+        alpha_low, alpha_high = 1e-6, 1e5
+    else:
+        alpha_low, alpha_high = 1e-4, 1e3
+    return {
+        "feature_set": trial.suggest_categorical("feature_set", tuple(STACK_FEATURE_SETS)),
+        "alpha": trial.suggest_float("alpha", alpha_low, alpha_high, log=True),
+        "fit_intercept": trial.suggest_categorical("fit_intercept", [True, False]),
+    }
 
 
 def _create_optuna_study(config: StationStackingConfig, method: str):
     import optuna
 
     optuna.logging.set_verbosity(optuna.logging.INFO if config.optuna_verbose else optuna.logging.WARNING)
-    sampler = optuna.samplers.TPESampler(seed=config.random_state + BASE_MODEL_METHODS.index(method))
+    sampler = optuna.samplers.TPESampler(
+        seed=config.random_state + BASE_MODEL_METHODS.index(method),
+        n_startup_trials=config.effective_optuna_startup_trials,
+    )
     pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=1)
-    return optuna.create_study(direction="minimize", sampler=sampler, pruner=pruner)
+    return optuna.create_study(
+        direction="minimize",
+        sampler=sampler,
+        pruner=pruner,
+        **_optuna_study_storage_kwargs(config, stage="base", method=method),
+    )
+
+
+def _optuna_study_storage_kwargs(config: StationStackingConfig, *, stage: str, method: str) -> dict[str, Any]:
+    storage_uri = config.resolved_optuna_storage_uri()
+    if storage_uri is None:
+        return {}
+    storage_path = config.resolved_optuna_storage_path()
+    if storage_path is not None:
+        storage_path.parent.mkdir(parents=True, exist_ok=True)
+    return {
+        "storage": storage_uri,
+        "study_name": _optuna_study_name(config, stage=stage, method=method),
+        "load_if_exists": True,
+    }
+
+
+def _optuna_study_name(config: StationStackingConfig, *, stage: str, method: str) -> str:
+    station = config.station_id.upper()
+    version = config.effective_feature_version
+    metric = config.effective_optuna_metric
+    target = config.effective_target_mode
+    target_part = "" if target == TARGET_MODE_DIRECT_HIGH else f"_{target}"
+    return f"{station}_{version}{target_part}_{stage}_{method}_{metric}"
+
+
+def _remaining_optuna_trials(study: Any, target_trials: int) -> int:
+    return max(0, int(target_trials) - len(_study_trials(study)))
+
+
+def _study_trials(study: Any) -> list[Any]:
+    if hasattr(study, "get_trials"):
+        return list(study.get_trials(deepcopy=False))
+    return list(getattr(study, "trials", []))
+
+
+def _study_tuning_rows(study: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for trial in _study_trials(study):
+        attrs = getattr(trial, "user_attrs", {}) or {}
+        trial_rows = attrs.get("tuning_rows")
+        if not isinstance(trial_rows, list):
+            continue
+        rows.extend(dict(row) for row in trial_rows if isinstance(row, dict))
+    return rows
+
+
+def _set_trial_checkpoint_attrs(
+    trial: Any,
+    *,
+    method: str,
+    param_key: str,
+    params: dict[str, Any],
+    rows: list[dict[str, Any]],
+    fit_metadata: list[dict[str, Any]],
+    status: str,
+    error: str,
+    objective_value: float | None = None,
+) -> None:
+    if not hasattr(trial, "set_user_attr"):
+        return
+    attrs: dict[str, Any] = {
+        "method": method,
+        "param_key": param_key,
+        "params": params,
+        "tuning_rows": rows,
+        "fold_metrics": _fold_metric_attrs(rows),
+        "fit_metadata": fit_metadata,
+        "status": status,
+        "error": error,
+    }
+    if objective_value is not None:
+        attrs["objective_value"] = objective_value
+    for key, value in attrs.items():
+        trial.set_user_attr(key, _optuna_jsonable(value))
+
+
+def _fold_metric_attrs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    keys = ("fold", "fold_weight", "mae_f", "rmse_f", "count", "status", "error")
+    return [{key: row.get(key) for key in keys if key in row} for row in rows]
+
+
+def _optuna_jsonable(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _optuna_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_optuna_jsonable(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return _optuna_jsonable(value.item())
+    if value is None or value is pd.NA:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    try:
+        if bool(pd.isna(value)):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
 
 
 def _suggest_hyperparameters(method: str, trial, config: StationStackingConfig) -> dict[str, Any]:
+    wide = config.effective_hyperparameter_space == "wide"
     if method == "xgboost":
-        max_estimators = 250 if config.fast_mode else 2000
-        return {
-            "n_estimators": trial.suggest_int("n_estimators", 80, max_estimators),
-            "learning_rate": trial.suggest_float("learning_rate", 0.003, 0.15, log=True),
-            "max_depth": trial.suggest_int("max_depth", 1, 8),
-            "min_child_weight": trial.suggest_float("min_child_weight", 0.1, 20.0, log=True),
-            "gamma": trial.suggest_float("gamma", 0.0, 5.0),
-            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-            "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True),
-            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 50.0, log=True),
+        max_estimators = 400 if config.fast_mode else (3500 if wide else 2000)
+        params = {
+            "n_estimators": trial.suggest_int("n_estimators", 50 if wide else 80, max_estimators),
+            "learning_rate": trial.suggest_float("learning_rate", 0.001 if wide else 0.003, 0.25 if wide else 0.15, log=True),
+            "max_depth": trial.suggest_int("max_depth", 1, 12 if wide else 8),
+            "min_child_weight": trial.suggest_float("min_child_weight", 0.01 if wide else 0.1, 100.0 if wide else 20.0, log=True),
+            "gamma": trial.suggest_float("gamma", 0.0, 15.0 if wide else 5.0),
+            "subsample": trial.suggest_float("subsample", 0.35 if wide else 0.5, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.35 if wide else 0.5, 1.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-10 if wide else 1e-8, 100.0 if wide else 10.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-4 if wide else 1e-3, 200.0 if wide else 50.0, log=True),
         }
+        if config.effective_feature_version == "v11":
+            params["objective"] = "reg:pseudohubererror"
+        return params
     if method == "lightgbm":
-        max_estimators = 250 if config.fast_mode else 2000
-        return {
-            "n_estimators": trial.suggest_int("n_estimators", 80, max_estimators),
-            "learning_rate": trial.suggest_float("learning_rate", 0.003, 0.15, log=True),
-            "num_leaves": trial.suggest_int("num_leaves", 4, 256),
-            "max_depth": trial.suggest_int("max_depth", 2, 10),
-            "min_child_samples": trial.suggest_int("min_child_samples", 5, 150),
-            "min_split_gain": trial.suggest_float("min_split_gain", 0.0, 2.0),
-            "bagging_fraction": trial.suggest_float("bagging_fraction", 0.5, 1.0),
+        max_estimators = 400 if config.fast_mode else (3500 if wide else 2000)
+        params = {
+            "n_estimators": trial.suggest_int("n_estimators", 50 if wide else 80, max_estimators),
+            "learning_rate": trial.suggest_float("learning_rate", 0.001 if wide else 0.003, 0.25 if wide else 0.15, log=True),
+            "num_leaves": trial.suggest_int("num_leaves", 4, 512 if wide else 256),
+            "max_depth": trial.suggest_int("max_depth", 2, 14 if wide else 10),
+            "min_child_samples": trial.suggest_int("min_child_samples", 2 if wide else 5, 250 if wide else 150),
+            "min_split_gain": trial.suggest_float("min_split_gain", 0.0, 5.0 if wide else 2.0),
+            "bagging_fraction": trial.suggest_float("bagging_fraction", 0.35 if wide else 0.5, 1.0),
             "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
-            "feature_fraction": trial.suggest_float("feature_fraction", 0.5, 1.0),
-            "lambda_l1": trial.suggest_float("lambda_l1", 1e-8, 10.0, log=True),
-            "lambda_l2": trial.suggest_float("lambda_l2", 1e-3, 50.0, log=True),
+            "feature_fraction": trial.suggest_float("feature_fraction", 0.35 if wide else 0.5, 1.0),
+            "lambda_l1": trial.suggest_float("lambda_l1", 1e-10 if wide else 1e-8, 100.0 if wide else 10.0, log=True),
+            "lambda_l2": trial.suggest_float("lambda_l2", 1e-4 if wide else 1e-3, 200.0 if wide else 50.0, log=True),
         }
+        if config.effective_feature_version == "v11":
+            params["objective"] = "huber"
+            params["huber_alpha"] = trial.suggest_categorical("huber_alpha", (0.75, 0.85, 0.9, 0.95))
+        return params
     if method == "catboost":
-        max_iterations = 250 if config.fast_mode else 2000
-        return {
-            "iterations": trial.suggest_int("iterations", 80, max_iterations),
-            "learning_rate": trial.suggest_float("learning_rate", 0.003, 0.15, log=True),
-            "depth": trial.suggest_int("depth", 2, 10),
-            "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 0.5, 50.0, log=True),
-            "random_strength": trial.suggest_float("random_strength", 0.0, 10.0),
-            "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 10.0),
-            "border_count": trial.suggest_int("border_count", 32, 255),
-            "rsm": trial.suggest_float("rsm", 0.5, 1.0),
+        max_iterations = 400 if config.fast_mode else (3500 if wide else 2000)
+        params = {
+            "iterations": trial.suggest_int("iterations", 50 if wide else 80, max_iterations),
+            "learning_rate": trial.suggest_float("learning_rate", 0.001 if wide else 0.003, 0.25 if wide else 0.15, log=True),
+            "depth": trial.suggest_int("depth", 2, 12 if wide else 10),
+            "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 0.05 if wide else 0.5, 200.0 if wide else 50.0, log=True),
+            "random_strength": trial.suggest_float("random_strength", 0.0, 20.0 if wide else 10.0),
+            "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 20.0 if wide else 10.0),
+            "border_count": trial.suggest_int("border_count", 16 if wide else 32, 255),
+            "rsm": trial.suggest_float("rsm", 0.35 if wide else 0.5, 1.0),
         }
+        if config.effective_feature_version in {"v10", "v11"}:
+            params["huber_delta"] = trial.suggest_categorical("huber_delta", (0.5, 1.0, 1.5, 2.0, 3.0, 5.0))
+        return params
     raise ValueError(f"Unknown base model method: {method}")
 
 
-def _selected_hyperparameters(tuning: pd.DataFrame) -> pd.DataFrame:
+def _selected_hyperparameters(tuning: pd.DataFrame, metric_col: str = "rmse_f") -> pd.DataFrame:
+    if metric_col not in {"mae_f", "rmse_f"}:
+        raise ValueError("metric_col must be 'mae_f' or 'rmse_f'")
+    mean_metric_col = f"mean_validation_{metric_col}"
     if tuning.empty:
-        return pd.DataFrame(columns=["method", "param_key", "mean_validation_rmse_f"])
+        return pd.DataFrame(columns=["method", "param_key", "mean_validation_rmse_f", "mean_validation_mae_f"])
     ok = tuning.loc[tuning["status"].eq("ok")].copy()
     if ok.empty:
-        return pd.DataFrame(columns=["method", "param_key", "mean_validation_rmse_f"])
+        return pd.DataFrame(columns=["method", "param_key", "mean_validation_rmse_f", "mean_validation_mae_f"])
     if "fold" in ok:
         fold_counts = ok.groupby(["method", "param_key"], dropna=False)["fold"].nunique()
         complete_fold_count = int(fold_counts.max()) if not fold_counts.empty else 0
@@ -2072,7 +3201,7 @@ def _selected_hyperparameters(tuning: pd.DataFrame) -> pd.DataFrame:
         )
 
     grouped = ok.groupby(["method", "param_key"], dropna=False).apply(weighted_metrics, include_groups=False).reset_index()
-    grouped = grouped.sort_values(["method", "mean_validation_rmse_f", "param_key"])
+    grouped = grouped.sort_values(["method", mean_metric_col, "param_key"])
     selected = grouped.groupby("method", dropna=False).head(1).reset_index(drop=True)
     param_columns = [column for column in tuning.columns if column.startswith("param_") and column != "param_key"]
     params = ok[["method", "param_key", *param_columns]].drop_duplicates(["method", "param_key"])
@@ -2258,9 +3387,13 @@ def _sort_year_split_visible_methods(frame: pd.DataFrame, include_period: bool =
     return out.reset_index(drop=True)
 
 
-def _stack_source_frame(base_predictions: pd.DataFrame, baseline_predictions: pd.DataFrame) -> pd.DataFrame:
+def _stack_source_frame(
+    base_predictions: pd.DataFrame,
+    baseline_predictions: pd.DataFrame,
+    base_model_methods: Iterable[str] | None = None,
+) -> pd.DataFrame:
     combined = pd.concat([base_predictions, baseline_predictions], ignore_index=True)
-    combined = combined.loc[combined["method"].isin([*BASE_MODEL_METHODS, *BASELINE_METHODS])].copy()
+    combined = combined.loc[combined["method"].isin([*(base_model_methods or BASE_MODEL_METHODS), *BASELINE_METHODS])].copy()
     if combined.empty:
         return pd.DataFrame()
     pivot = combined.pivot_table(

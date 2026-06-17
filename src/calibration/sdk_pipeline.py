@@ -31,6 +31,7 @@ SDK_AVAILABILITY_FILE = "sdk_archive_availability.csv"
 SDK_COVERAGE_SUMMARY_FILE = "sdk_coverage_summary.csv"
 SDK_MISSING_COVERAGE_FILE = "sdk_missing_coverage.csv"
 WEATHER_FEATURE_FLAG = "weather_features_included"
+PRECIP_FEATURE_FLAG = "precip_features_included"
 DIRECT_NBM_WEATHER_FEATURE_FLAG = WEATHER_FEATURE_FLAG
 
 TARGET_STATIONS = [
@@ -148,12 +149,21 @@ MODEL_CYCLE_HOURS_FALLBACK = {
 TIMING_MODE_STRICT_6AM = "strict_6am"
 TIMING_MODE_FRESH_AFTER_6AM = "fresh_after_6am"
 TIMING_MODE_SAME_DAY_11AM = "same_day_11am"
-TIMING_MODES = [TIMING_MODE_STRICT_6AM, TIMING_MODE_FRESH_AFTER_6AM, TIMING_MODE_SAME_DAY_11AM]
+TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE = "same_day_11am_live_safe"
+TIMING_MODES = [
+    TIMING_MODE_STRICT_6AM,
+    TIMING_MODE_FRESH_AFTER_6AM,
+    TIMING_MODE_SAME_DAY_11AM,
+    TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE,
+]
 TIMING_MODE_SOURCE_LABELS = {
     TIMING_MODE_STRICT_6AM: "strict_6am",
     TIMING_MODE_FRESH_AFTER_6AM: "fresh_after_6am_remaining_day",
     TIMING_MODE_SAME_DAY_11AM: "same_day_11am_remaining_day",
+    TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE: "same_day_11am_live_safe_remaining_day",
 }
+LIVE_SAFE_DECISION_DELAY_MINUTES = 15
+LIVE_SAFE_MODEL_LAG_MINUTES = {"hrrr": 75, "gfs": 270, "nbm": 120}
 NBM_SAME_DAY_11AM_RECENT_DAYS = 2
 NWP_FXX_FETCH_RETRIES = 2
 NWP_FXX_RETRY_SLEEP_SECONDS = 5.0
@@ -174,6 +184,7 @@ class NwpRequest:
     cycle_selection_policy: str
     forecast_window_start: datetime
     forecast_window_end: datetime
+    temperature_only: bool = False
 
 
 def default_sdk_cache_dir(calibration_dir: str | Path = "data/calibration") -> Path:
@@ -184,6 +195,16 @@ def resolve_contract_end(value: str | None) -> date:
     if value is None or value.lower() in {"latest", "latest-complete", "latest_complete"}:
         return datetime.now(UTC).date() - timedelta(days=1)
     return date.fromisoformat(value[:10])
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        return max(minimum, int(value))
+    except ValueError:
+        return default
 
 
 def latest_complete_contract_date() -> date:
@@ -218,7 +239,7 @@ def local_datetime_utc(contract_date: str | date, timezone: str, hour: int) -> d
 def forecast_as_of_for_timing(contract_date: str | date, timezone: str, timing_mode: str) -> datetime:
     if timing_mode == TIMING_MODE_FRESH_AFTER_6AM:
         return local_datetime_utc(contract_date, timezone, 7)
-    if timing_mode == TIMING_MODE_SAME_DAY_11AM:
+    if timing_mode in {TIMING_MODE_SAME_DAY_11AM, TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE}:
         return local_datetime_utc(contract_date, timezone, 11)
     if timing_mode == TIMING_MODE_STRICT_6AM:
         return forecast_as_of_utc(contract_date, timezone)
@@ -232,7 +253,11 @@ def forecast_window_for_timing(
     forecast_as_of: datetime,
 ) -> tuple[datetime, datetime]:
     start_utc, end_utc = local_day_utc_bounds(contract_date, timezone)
-    if timing_mode in {TIMING_MODE_FRESH_AFTER_6AM, TIMING_MODE_SAME_DAY_11AM}:
+    if timing_mode in {
+        TIMING_MODE_FRESH_AFTER_6AM,
+        TIMING_MODE_SAME_DAY_11AM,
+        TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE,
+    }:
         return forecast_as_of.astimezone(UTC), end_utc
     if timing_mode == TIMING_MODE_STRICT_6AM:
         return start_utc, end_utc
@@ -294,6 +319,61 @@ def choose_fresh_after_6am_cycle(
         f for f in forecast_hours_for_utc_window(cycle, forecast_as_of, local_midnight) if 0 <= f <= max_fxx
     )
     return cycle, fxx_hours, forecast_as_of, forecast_as_of, local_midnight
+
+
+def choose_same_day_11am_live_safe_cycle(
+    model: str,
+    contract_date: str,
+    timezone: str,
+) -> tuple[datetime | None, tuple[int, ...], datetime, datetime, datetime]:
+    model = model.lower()
+    forecast_as_of = forecast_as_of_for_timing(contract_date, timezone, TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE)
+    _, local_midnight = local_day_utc_bounds(contract_date, timezone)
+    decision_time = forecast_as_of + timedelta(minutes=LIVE_SAFE_DECISION_DELAY_MINUTES)
+    lag_minutes = LIVE_SAFE_MODEL_LAG_MINUTES.get(model, MODEL_LAG_MINUTES.get(model, 120))
+    cutoff = (decision_time - timedelta(minutes=lag_minutes)).replace(minute=0, second=0, microsecond=0)
+    allowed_hours = set(model_cycle_hours(model))
+    max_fxx = MODEL_MAX_FXX.get(model, 72)
+    search_hours = MODEL_SEARCH_HOURS.get(model, 36)
+    for offset in range(search_hours + 1):
+        cycle = cutoff - timedelta(hours=offset)
+        if cycle.hour not in allowed_hours:
+            continue
+        fxx_hours = tuple(
+            f
+            for f in forecast_hours_for_utc_window(cycle, forecast_as_of, local_midnight)
+            if 0 <= f <= max_fxx
+        )
+        if not fxx_hours:
+            continue
+        if model == "hrrr" and max(fxx_hours) > 18 and cycle.hour not in HRRR_LONG_CYCLES:
+            continue
+        return cycle, fxx_hours, forecast_as_of, forecast_as_of, local_midnight
+    return None, (), forecast_as_of, forecast_as_of, local_midnight
+
+
+def choose_direct_nbm_13z_live_safe_cycle(
+    contract_date: str,
+    timezone: str,
+) -> tuple[datetime | None, tuple[int, ...], datetime, datetime, datetime]:
+    forecast_as_of = forecast_as_of_for_timing(contract_date, timezone, TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE)
+    window_start, window_end = forecast_window_for_timing(
+        contract_date,
+        timezone,
+        TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE,
+        forecast_as_of,
+    )
+    cycle = datetime.combine(date.fromisoformat(contract_date), datetime.min.time(), tzinfo=UTC).replace(hour=13)
+    decision_time = forecast_as_of + timedelta(minutes=LIVE_SAFE_DECISION_DELAY_MINUTES)
+    available_at = cycle + timedelta(minutes=LIVE_SAFE_MODEL_LAG_MINUTES["nbm"])
+    if available_at > decision_time:
+        return None, (), forecast_as_of, window_start, window_end
+    fxx_hours = tuple(
+        f
+        for f in forecast_hours_for_utc_window(cycle, window_start, window_end)
+        if 0 <= f <= MODEL_MAX_FXX["nbm"]
+    )
+    return cycle, fxx_hours, forecast_as_of, window_start, window_end
 
 
 def chunk_dates(dates: list[str], chunk_days: int) -> Iterable[tuple[str, str]]:
@@ -483,6 +563,7 @@ def backfill_sdk_nwp(
     batch_stations: bool = True,
     fxx_workers: int = 1,
     include_weather_features: bool = False,
+    temperature_only: bool = False,
 ) -> pd.DataFrame:
     out_dir = Path(sdk_cache_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -495,16 +576,27 @@ def backfill_sdk_nwp(
         raise ValueError(f"Unsupported SDK NWP models: {sorted(unknown)}")
     if fxx_workers < 1:
         raise ValueError("fxx_workers must be >= 1")
+    if include_weather_features and temperature_only:
+        raise ValueError("temperature_only cannot be combined with include_weather_features")
     station_meta = write_station_registry(out_dir, stations)
     write_sdk_availability(out_dir, start_date=start_date, end_date=end_date, models=models)
     cache_path = out_dir / SDK_NWP_FILE
     existing = _load_existing(cache_path)
     completed = _completed_nwp_keys(existing, require_weather_features=include_weather_features) if not force else set()
     dates = date_range(start_date, resolve_contract_end(end_date))
-    requests = plan_nwp_requests(station_meta, dates, models, completed, timing_mode=timing_mode)
+    requests = plan_nwp_requests(
+        station_meta,
+        dates,
+        models,
+        completed,
+        timing_mode=timing_mode,
+        temperature_only=temperature_only,
+    )
     if not requests:
         return existing
     forecast_nwp = _load_forecast_nwp(station_meta)
+    if temperature_only:
+        _patch_mostlyright_nwp_temperature_only(models)
     client = _nwp_http_client()
     processed = 0
     batch_limit = max_batches if max_batches is not None else max_requests
@@ -516,6 +608,7 @@ def backfill_sdk_nwp(
                     batch,
                     client=client,
                     fxx_workers=fxx_workers,
+                    temperature_only=temperature_only,
                 )
                 existing = _append_cache(
                     cache_path,
@@ -566,8 +659,8 @@ def backfill_direct_nbm(
     timing_mode: str = TIMING_MODE_SAME_DAY_11AM,
     include_weather_features: bool = False,
 ) -> pd.DataFrame:
-    if timing_mode != TIMING_MODE_SAME_DAY_11AM:
-        raise ValueError("Direct NOAA NBM currently supports timing_mode='same_day_11am'")
+    if timing_mode not in {TIMING_MODE_SAME_DAY_11AM, TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE}:
+        raise ValueError("Direct NOAA NBM supports timing_mode='same_day_11am' or 'same_day_11am_live_safe'")
     out_dir = Path(cache_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     station_meta = write_station_registry(out_dir, stations)
@@ -596,13 +689,14 @@ def backfill_direct_nbm(
             "nbm_domain_suffix": "co",
             "nbm_download_retries": 4,
             "nbm_retry_backoff_seconds": 5,
+            "nbm_prefetch_workers": _env_int("WEATHER_RESEARCH_NBM_PREFETCH_WORKERS", 1),
         }
     }
     processed = 0
     from ..nws_fetch import NBM_TMP, TransientNbmDownloadError, _extract_nbm_run_points
     from ..nws_fetch import _extract_nbm_run_feature_points
 
-    for batch in _group_nwp_requests(requests):
+    for batch in _group_direct_nbm_requests(requests):
         station_points = {
             request.station_id: {
                 "lat": float(station_meta.loc[station_meta["station_id"] == request.station_id, "lat"].iloc[0]),
@@ -624,7 +718,7 @@ def backfill_direct_nbm(
                 )
                 run_values = {
                     station_id: {
-                        fxx: values.get("temp_k_2m")
+                        fxx: _k_scalar_to_f(values.get("temp_k_2m"))
                         for fxx, values in fxx_map.items()
                         if values.get("temp_k_2m") is not None
                     }
@@ -717,9 +811,17 @@ def plan_direct_nbm_requests(
                 continue
             if (station_id, contract_date, "nbm", "nbm", timing_mode) in completed:
                 continue
-            as_of = forecast_as_of_for_timing(contract_date, timezone, timing_mode)
-            window_start, window_end = forecast_window_for_timing(contract_date, timezone, timing_mode, as_of)
-            cycle, fxx_hours = choose_latest_cycle_for_window("nbm", as_of, window_start, window_end, min_fxx=1)
+            if timing_mode == TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE:
+                cycle, fxx_hours, as_of, window_start, window_end = choose_direct_nbm_13z_live_safe_cycle(
+                    contract_date,
+                    timezone,
+                )
+                cycle_selection_policy = "direct_noaa_nbm_13z_cycle_available_by_1115_local_with_120min_buffer"
+            else:
+                as_of = forecast_as_of_for_timing(contract_date, timezone, timing_mode)
+                window_start, window_end = forecast_window_for_timing(contract_date, timezone, timing_mode, as_of)
+                cycle, fxx_hours = choose_latest_cycle_for_window("nbm", as_of, window_start, window_end, min_fxx=1)
+                cycle_selection_policy = "direct_noaa_latest_cycle_at_or_before_11am_local_no_safety_lag"
             if cycle is None or not fxx_hours:
                 continue
             requests.append(
@@ -734,7 +836,7 @@ def plan_direct_nbm_requests(
                     cycle=cycle,
                     fxx_hours=fxx_hours,
                     timing_mode=timing_mode,
-                    cycle_selection_policy="direct_noaa_latest_cycle_at_or_before_11am_local_no_safety_lag",
+                    cycle_selection_policy=cycle_selection_policy,
                     forecast_window_start=window_start,
                     forecast_window_end=window_end,
                 )
@@ -791,13 +893,15 @@ def _summarize_direct_nbm_feature_values(request: NwpRequest, values_by_fxx: dic
     dew_f = [_k_scalar_to_f(v.get("dewpoint_k_2m")) for _, v in ordered]
     wind_mph = [_ms_scalar_to_mph(v.get("wind_speed_ms_10m")) for _, v in ordered]
     gust_mph = [_ms_scalar_to_mph(v.get("wind_gust_ms")) for _, v in ordered]
+    precip_summary = _precip_summary_from_values([v.get("precip_mm_1h") for _, v in ordered])
     return {
         "forecast_temp_at_as_of_f": _k_scalar_to_f(first.get("temp_k_2m")),
         "dewpoint_mean_f": _clean_mean(dew_f),
         "dewpoint_at_as_of_f": _k_scalar_to_f(first.get("dewpoint_k_2m")),
         "humidity_mean": _clean_mean([v.get("relative_humidity_pct_2m") for _, v in ordered]),
         "humidity_at_as_of": first.get("relative_humidity_pct_2m", pd.NA),
-        "precip_amount": _clean_sum([v.get("precip_mm_1h") for _, v in ordered]),
+        "precip_amount": precip_summary["forecast_precip_total_mm"],
+        **precip_summary,
         "cloud_cover_mean": _clean_mean([v.get("cloud_cover_pct") for _, v in ordered]),
         "cloud_cover_max": _clean_max([v.get("cloud_cover_pct") for _, v in ordered]),
         "wind_speed_mean": _clean_mean(wind_mph),
@@ -817,6 +921,7 @@ def plan_nwp_requests(
     models: list[str],
     completed: set[tuple[str, str, str, str, str]] | None = None,
     timing_mode: str = TIMING_MODE_STRICT_6AM,
+    temperature_only: bool = False,
 ) -> list[NwpRequest]:
     completed = completed or set()
     archive = nwp_archive_starts()
@@ -833,6 +938,12 @@ def plan_nwp_requests(
                     continue
                 if timing_mode == TIMING_MODE_FRESH_AFTER_6AM:
                     cycle, fxx_hours, as_of, window_start, window_end = choose_fresh_after_6am_cycle(
+                        model,
+                        contract_date,
+                        timezone,
+                    )
+                elif timing_mode == TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE:
+                    cycle, fxx_hours, as_of, window_start, window_end = choose_same_day_11am_live_safe_cycle(
                         model,
                         contract_date,
                         timezone,
@@ -866,6 +977,7 @@ def plan_nwp_requests(
                         cycle_selection_policy=_cycle_selection_policy(model, timing_mode),
                         forecast_window_start=window_start,
                         forecast_window_end=window_end,
+                        temperature_only=temperature_only,
                     )
                 )
     return requests
@@ -883,6 +995,9 @@ def choose_cycle(
     model = model.lower()
     if timing_mode == TIMING_MODE_FRESH_AFTER_6AM:
         cycle, fxx_hours, _, _, _ = choose_fresh_after_6am_cycle(model, contract_date, timezone)
+        return (cycle, fxx_hours) if cycle is not None and fxx_hours else (None, ())
+    if timing_mode == TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE:
+        cycle, fxx_hours, _, _, _ = choose_same_day_11am_live_safe_cycle(model, contract_date, timezone)
         return (cycle, fxx_hours) if cycle is not None and fxx_hours else (None, ())
     if timing_mode == TIMING_MODE_SAME_DAY_11AM:
         if forecast_window_start is None or forecast_window_end is None:
@@ -1044,10 +1159,40 @@ def _ensure_ecmwflibs_available() -> None:
         root = Path(ecmwflibs.__file__).parent
         os.environ["PATH"] = f"{root};{os.environ.get('PATH', '')}"
         os.environ.setdefault("ECCODES_LIB_DIR", str(root))
+        eccodes_dll = root / "eccodes.dll"
+        if eccodes_dll.exists():
+            os.environ.setdefault("ECCODES_PYTHON_USE_FINDLIBS", "1")
+            try:
+                import findlibs
+
+                original_find = findlibs.find
+
+                def _find_ecmwflibs_first(lib_name: str, pkg_name: str | None = None):
+                    if lib_name == "eccodes":
+                        return str(eccodes_dll)
+                    return original_find(lib_name, pkg_name)
+
+                findlibs.find = _find_ecmwflibs_first
+            except Exception:
+                pass
         if hasattr(os, "add_dll_directory"):
             os.add_dll_directory(str(root))
     except Exception:
         return
+
+
+def _patch_mostlyright_nwp_temperature_only(models: Iterable[str]) -> None:
+    try:
+        from mostlyright.weather._fetchers import _nwp_grids
+    except Exception:
+        return
+    modules = getattr(_nwp_grids, "_MODULES", {})
+    for model in {str(model).lower() for model in models}:
+        module = modules.get(model)
+        variable_map = getattr(module, "VARIABLE_MAP", None)
+        if not isinstance(variable_map, dict) or "temp_k_2m" not in variable_map:
+            continue
+        module.VARIABLE_MAP = {"temp_k_2m": variable_map["temp_k_2m"]}
 
 
 def _patch_mostlyright_station_runtime(station_meta: pd.DataFrame) -> None:
@@ -1227,6 +1372,12 @@ def _unavailable_actual_row(station: Any, contract_date: str, reason: str) -> di
 def _cycle_selection_policy(model: str, timing_mode: str) -> str:
     if timing_mode == TIMING_MODE_FRESH_AFTER_6AM:
         return f"first_{model}_cycle_issued_at_or_after_6am_local_remaining_day"
+    if timing_mode == TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE:
+        lag = LIVE_SAFE_MODEL_LAG_MINUTES.get(model, MODEL_LAG_MINUTES.get(model, 120))
+        return (
+            f"latest_{model}_cycle_available_by_1115_local_with_{lag}min_lag_"
+            "remaining_day"
+        )
     if timing_mode == TIMING_MODE_SAME_DAY_11AM:
         return f"latest_{model}_cycle_at_or_before_11am_local_remaining_day"
     return f"latest_{model}_cycle_before_6am_local_with_model_lag"
@@ -1250,10 +1401,25 @@ def _group_nwp_requests(requests: list[NwpRequest]) -> Iterable[list[NwpRequest]
             request.fxx_hours,
             request.forecast_window_start,
             request.forecast_window_end,
+            request.temperature_only,
         )
         groups.setdefault(key, []).append(request)
     for key in sorted(groups):
         yield sorted(groups[key], key=lambda request: request.station_id)
+
+
+def _group_direct_nbm_requests(requests: list[NwpRequest]) -> Iterable[list[NwpRequest]]:
+    groups: dict[tuple[Any, ...], list[NwpRequest]] = {}
+    for request in requests:
+        key = (
+            request.model,
+            request.timing_mode,
+            request.contract_date,
+            request.cycle,
+        )
+        groups.setdefault(key, []).append(request)
+    for key in sorted(groups):
+        yield sorted(groups[key], key=lambda request: (request.timezone, request.station_id))
 
 
 def _fetch_and_summarize_nwp_batch(
@@ -1261,11 +1427,18 @@ def _fetch_and_summarize_nwp_batch(
     requests: list[NwpRequest],
     client: Any = None,
     fxx_workers: int = 1,
+    temperature_only: bool = False,
 ) -> list[dict[str, Any]]:
     if not requests:
         return []
     try:
-        hourly = _fetch_batch_hourly(forecast_nwp, requests, client=client, fxx_workers=fxx_workers)
+        hourly = _fetch_batch_hourly(
+            forecast_nwp,
+            requests,
+            client=client,
+            fxx_workers=fxx_workers,
+            temperature_only=temperature_only,
+        )
     except Exception as exc:  # noqa: BLE001
         logging.warning(
             "Mostly Right NWP batch unavailable for %s %s %s %s stations: %s",
@@ -1291,11 +1464,16 @@ def _fetch_batch_hourly(
     requests: list[NwpRequest],
     client: Any = None,
     fxx_workers: int = 1,
+    temperature_only: bool = False,
 ) -> pd.DataFrame:
     first = requests[0]
     station_ids = [request.station_id for request in requests]
     if _use_nwp_subprocess_fetch(first):
-        return _fetch_nwp_batch_hourly_subprocess(requests)
+        return _fetch_nwp_batch_hourly_subprocess(
+            requests,
+            temperature_only=temperature_only,
+            fxx_workers=fxx_workers,
+        )
     if fxx_workers <= 1 or len(first.fxx_hours) <= 1:
         frames = [
             _fetch_one_nwp_fxx_with_retries(forecast_nwp, station_ids, first, fxx, client=client)
@@ -1330,47 +1508,70 @@ def _use_nbm_subprocess_fetch(request: NwpRequest) -> bool:
     return _use_nwp_subprocess_fetch(request)
 
 
-def _fetch_nwp_batch_hourly_subprocess(requests: list[NwpRequest]) -> pd.DataFrame:
+def _fetch_nwp_batch_hourly_subprocess(
+    requests: list[NwpRequest],
+    temperature_only: bool = False,
+    fxx_workers: int = 1,
+) -> pd.DataFrame:
     first = requests[0]
-    payload = {
+    base_payload = {
         "stations": [request.station_id for request in requests],
         "model": first.model,
         "cycle": first.cycle.isoformat(),
-        "fxx_hours": list(first.fxx_hours),
+        "temperature_only": bool(temperature_only or first.temperature_only),
     }
     max_attempts = max(1, _nwp_fxx_fetch_retries() + 1)
     timeout_seconds = _nwp_subprocess_timeout_seconds()
-    last_error = ""
-    for attempt in range(1, max_attempts + 1):
-        with tempfile.TemporaryDirectory(prefix=f"weather_research_{first.model}_") as tmp:
-            tmp_path = Path(tmp)
-            payload_path = tmp_path / "payload.json"
-            output_path = tmp_path / "hourly.csv"
-            payload["output"] = str(output_path)
-            payload_path.write_text(json.dumps(payload), encoding="utf-8")
-            result = subprocess.run(
-                [sys.executable, "-c", _NWP_SUBPROCESS_CODE, str(payload_path)],
-                cwd=str(_project_root()),
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-                check=False,
-            )
-            if result.returncode == 0 and output_path.exists():
-                frame = pd.read_csv(output_path)
-                return _filter_nwp_hourly_frame(frame, first) if not frame.empty else pd.DataFrame()
-            last_error = (result.stderr or result.stdout or "").strip()
-            logging.warning(
-                "Mostly Right %s subprocess failed for %s %s cycle=%s attempt %s/%s: %s",
-                first.model.upper(),
-                first.contract_date,
-                first.timing_mode,
-                first.cycle.isoformat(),
-                attempt,
-                max_attempts,
-                last_error[-500:],
-            )
-    raise RuntimeError(f"{first.model.upper()} subprocess failed after {max_attempts} attempts: {last_error[-500:]}")
+
+    def run_payload(fxx_hours: Iterable[int]) -> pd.DataFrame:
+        payload = dict(base_payload)
+        payload["fxx_hours"] = list(fxx_hours)
+        last_error = ""
+        for attempt in range(1, max_attempts + 1):
+            with tempfile.TemporaryDirectory(prefix=f"weather_research_{first.model}_") as tmp:
+                tmp_path = Path(tmp)
+                payload_path = tmp_path / "payload.json"
+                output_path = tmp_path / "hourly.csv"
+                payload["output"] = str(output_path)
+                payload_path.write_text(json.dumps(payload), encoding="utf-8")
+                result = subprocess.run(
+                    [sys.executable, "-c", _NWP_SUBPROCESS_CODE, str(payload_path)],
+                    cwd=str(_project_root()),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                    check=False,
+                )
+                if result.returncode == 0 and output_path.exists():
+                    frame = pd.read_csv(output_path)
+                    return _filter_nwp_hourly_frame(frame, first) if not frame.empty else pd.DataFrame()
+                last_error = (result.stderr or result.stdout or "").strip()
+                logging.warning(
+                    "Mostly Right %s subprocess failed for %s %s cycle=%s fxx=%s attempt %s/%s: %s",
+                    first.model.upper(),
+                    first.contract_date,
+                    first.timing_mode,
+                    first.cycle.isoformat(),
+                    _format_fxx_hours(payload["fxx_hours"]),
+                    attempt,
+                    max_attempts,
+                    last_error[-500:],
+                )
+        raise RuntimeError(f"{first.model.upper()} subprocess failed after {max_attempts} attempts: {last_error[-500:]}")
+
+    fxx_hours = list(first.fxx_hours)
+    worker_count = min(max(1, int(fxx_workers)), len(fxx_hours) or 1)
+    if worker_count <= 1 or len(fxx_hours) <= 1:
+        return run_payload(fxx_hours)
+
+    frames: list[pd.DataFrame] = []
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(run_payload, [fxx]) for fxx in fxx_hours]
+        for future in as_completed(futures):
+            frame = future.result()
+            if frame is not None and not frame.empty:
+                frames.append(frame)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def _fetch_nbm_batch_hourly_subprocess(requests: list[NwpRequest]) -> pd.DataFrame:
@@ -1410,9 +1611,15 @@ from src.calibration.sdk_pipeline import _load_forecast_nwp, station_registry_fr
 payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 stations = [str(station).upper() for station in payload["stations"]]
 cycle = datetime.fromisoformat(payload["cycle"])
-forecast_nwp = _load_forecast_nwp(station_registry_frame(stations))
+if payload.get("temperature_only"):
+    from src.calibration.sdk_pipeline import _patch_mostlyright_nwp_temperature_only
+
+    _patch_mostlyright_nwp_temperature_only([payload["model"]])
+station_frame = station_registry_frame(stations)
+forecast_nwp = _load_forecast_nwp(station_frame)
+fxx_hours = [int(fxx) for fxx in payload["fxx_hours"]]
 frames = []
-for fxx in payload["fxx_hours"]:
+for fxx in fxx_hours:
     try:
         frame = forecast_nwp(stations, payload["model"], cycle=cycle, fxx=int(fxx))
     except Exception:
@@ -1573,6 +1780,7 @@ def _summarize_nwp_request(request: NwpRequest, hourly: pd.DataFrame) -> dict[st
     wind_gust = pd.to_numeric(hourly.get("wind_gust_ms", pd.Series(dtype=float)), errors="coerce")
     wind_speed_mph = np.sqrt(wind_u**2 + wind_v**2) * 2.2369362921
     wind_direction_deg = _wind_direction_from_uv(wind_u, wind_v)
+    precip_summary = _precip_summary_from_values(hourly.get("precip_mm_1h"))
     ordered = hourly.sort_values("valid_at") if "valid_at" in hourly else hourly
     first = ordered.iloc[0] if not ordered.empty else pd.Series(dtype="object")
     returned_fxx = _returned_fxx_hours(request, hourly)
@@ -1605,7 +1813,8 @@ def _summarize_nwp_request(request: NwpRequest, hourly: pd.DataFrame) -> dict[st
         "forecast_temp_at_as_of_f": _k_scalar_to_f(first.get("temp_k_2m")),
         "cloud_cover_mean": pd.NA,
         "cloud_cover_max": pd.NA,
-        "precip_amount": _sum(hourly.get("precip_mm_1h")),
+        "precip_amount": precip_summary["forecast_precip_total_mm"],
+        **precip_summary,
         "wind_speed_mean": _series_mean(wind_speed_mph),
         "wind_speed_max": _series_max(wind_speed_mph),
         "wind_speed_at_as_of": _ms_scalar_to_mph(_uv_speed_ms(first.get("wind_u_ms_10m"), first.get("wind_v_ms_10m"))),
@@ -1624,7 +1833,8 @@ def _summarize_nwp_request(request: NwpRequest, hourly: pd.DataFrame) -> dict[st
         "source_file_or_url": "mostlyright.weather.forecast_nwp",
         "fetch_status": "ok",
         "unavailable_reason": pd.NA,
-        WEATHER_FEATURE_FLAG: True,
+        WEATHER_FEATURE_FLAG: not request.temperature_only,
+        PRECIP_FEATURE_FLAG: not request.temperature_only,
     }
 
 
@@ -1657,6 +1867,7 @@ def _unavailable_nwp_row(request: NwpRequest, reason: str) -> dict[str, Any]:
         "fetch_status": "unavailable",
         "unavailable_reason": reason,
         WEATHER_FEATURE_FLAG: False,
+        PRECIP_FEATURE_FLAG: False,
     }
 
 
@@ -1733,10 +1944,13 @@ def _completed_nwp_keys(
         work["timing_mode"] = work["timing_mode"].fillna(TIMING_MODE_STRICT_6AM)
         if WEATHER_FEATURE_FLAG not in work.columns:
             work[WEATHER_FEATURE_FLAG] = False
+        if PRECIP_FEATURE_FLAG not in work.columns:
+            work[PRECIP_FEATURE_FLAG] = False
         status = work["fetch_status"].astype(str).str.lower()
         raw_high_ok = pd.to_numeric(work["raw_forecast_high_f"], errors="coerce").notna()
         feature_done = work[WEATHER_FEATURE_FLAG].map(_truthy)
-        good = work.loc[(status == "unavailable") | ((status == "ok") & raw_high_ok & feature_done)].copy()
+        precip_done = work[PRECIP_FEATURE_FLAG].map(_truthy)
+        good = work.loc[(status == "unavailable") | ((status == "ok") & raw_high_ok & feature_done & precip_done)].copy()
     else:
         good = _ok_rows(frame).dropna(subset=["raw_forecast_high_f"])
     if "timing_mode" not in good.columns:
@@ -1774,6 +1988,8 @@ def _completed_direct_nbm_keys(
     work["timing_mode"] = work["timing_mode"].fillna(TIMING_MODE_SAME_DAY_11AM)
     if DIRECT_NBM_WEATHER_FEATURE_FLAG not in work.columns:
         work[DIRECT_NBM_WEATHER_FEATURE_FLAG] = False
+    if PRECIP_FEATURE_FLAG not in work.columns:
+        work[PRECIP_FEATURE_FLAG] = False
     status = work["fetch_status"].astype(str).str.lower()
     raw_high_ok = (
         pd.to_numeric(work["raw_forecast_high_f"], errors="coerce").notna()
@@ -1781,7 +1997,8 @@ def _completed_direct_nbm_keys(
         else pd.Series(False, index=work.index)
     )
     feature_done = work[DIRECT_NBM_WEATHER_FEATURE_FLAG].map(_truthy)
-    complete = (status == "unavailable") | ((status == "ok") & raw_high_ok & feature_done)
+    precip_done = work[PRECIP_FEATURE_FLAG].map(_truthy)
+    complete = (status == "unavailable") | ((status == "ok") & raw_high_ok & feature_done & precip_done)
     done = work.loc[complete]
     return {
         (
@@ -1892,6 +2109,48 @@ def _first_existing(frame: pd.DataFrame, candidates: list[str]) -> str | None:
 
 def _k_to_f(series: pd.Series) -> pd.Series:
     return (series - 273.15) * 9 / 5 + 32
+
+
+def _precip_summary_from_values(values: Iterable[Any] | pd.Series | None) -> dict[str, Any]:
+    if values is None:
+        clean = pd.Series(dtype=float)
+    else:
+        clean = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+    if clean.empty:
+        return {
+            "forecast_precip_total_mm": pd.NA,
+            "forecast_precip_max_1h_mm": pd.NA,
+            "forecast_precip_hours_count": pd.NA,
+            "forecast_has_precip": pd.NA,
+            "forecast_precip_intensity_code": pd.NA,
+            "forecast_precip_intensity": pd.NA,
+            PRECIP_FEATURE_FLAG: True,
+        }
+    total_mm = float(clean.sum())
+    max_1h_mm = float(clean.max())
+    hours_count = int(clean.gt(0).sum())
+    intensity_code, intensity_label = _forecast_precip_intensity(total_mm, max_1h_mm)
+    return {
+        "forecast_precip_total_mm": total_mm,
+        "forecast_precip_max_1h_mm": max_1h_mm,
+        "forecast_precip_hours_count": hours_count,
+        "forecast_has_precip": int(total_mm > 0),
+        "forecast_precip_intensity_code": intensity_code,
+        "forecast_precip_intensity": intensity_label,
+        PRECIP_FEATURE_FLAG: True,
+    }
+
+
+def _forecast_precip_intensity(total_mm: float, max_1h_mm: float) -> tuple[int, str]:
+    if total_mm <= 0 or max_1h_mm <= 0:
+        return 0, "dry"
+    if max_1h_mm < 0.25 and total_mm < 1.0:
+        return 1, "trace_or_drizzle"
+    if max_1h_mm < 2.5:
+        return 2, "light_rain"
+    if max_1h_mm < 7.6:
+        return 3, "moderate_rain"
+    return 4, "heavy_rain"
 
 
 def _mean(series: pd.Series | None) -> float | Any:

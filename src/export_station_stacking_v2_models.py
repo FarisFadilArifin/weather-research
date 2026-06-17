@@ -12,14 +12,18 @@ import pandas as pd
 
 from src.calibration.station_stacking import (
     BASE_MODEL_METHODS,
+    OBSERVED_HIGH_SO_FAR_COLUMN,
+    REMAINING_WARMUP_TARGET,
     STACK_FEATURE_SETS,
     STACK_METHOD,
     TARGET,
+    TARGET_MODE_DIRECT_HIGH,
     TARGET_STATIONS,
-    YEAR_SPLIT_TEST_TRAIN_YEARS,
     StationStackingConfig,
     _build_base_model_pipeline,
     _fit_feature_columns,
+    _model_target_column,
+    _model_target_values,
     _modeling_frame,
     _params_from_selected_row,
     _stack_features_for_set,
@@ -30,6 +34,13 @@ from src.calibration.station_stacking import (
 MODEL_VERSION = "station_high_regressor_v2"
 DEFAULT_ARTIFACT_DIR = Path("data") / "calibration" / "station_stacking_v2"
 DEFAULT_MODEL_DIR_NAME = "model_weights"
+DEFAULT_TIMING_MODE = "same_day_11am"
+DEFAULT_PROVIDERS = ("gfs", "hrrr")
+DEFAULT_FEATURE_VERSION = "base"
+DEFAULT_OPTUNA_METRIC = "rmse_f"
+DEFAULT_TARGET_MODE = TARGET_MODE_DIRECT_HIGH
+DEFAULT_BASE_MODEL_METHODS = tuple(BASE_MODEL_METHODS)
+DEFAULT_SOURCE_PIPELINE = "notebooks/station_stacking_v2"
 
 
 @dataclass(frozen=True)
@@ -46,6 +57,14 @@ def export_station_model_weights(
     model_dir: str | Path | None = None,
     train_years: tuple[int, int] | None = None,
     model_version: str = MODEL_VERSION,
+    timing_mode: str = DEFAULT_TIMING_MODE,
+    providers: tuple[str, ...] = DEFAULT_PROVIDERS,
+    feature_version: str = DEFAULT_FEATURE_VERSION,
+    optuna_metric: str = DEFAULT_OPTUNA_METRIC,
+    target_mode: str = DEFAULT_TARGET_MODE,
+    base_model_methods: tuple[str, ...] = DEFAULT_BASE_MODEL_METHODS,
+    stack_enabled: bool = True,
+    source_pipeline: str = DEFAULT_SOURCE_PIPELINE,
 ) -> ExportedModelWeights:
     root = Path(project_root).resolve()
     station = station_id.upper()
@@ -56,9 +75,25 @@ def export_station_model_weights(
     features = _read_required_csv(artifacts / f"{station}_features.csv")
     selected = _read_required_csv(artifacts / f"{station}_year_split_selected_hyperparameters.csv")
     validation_predictions = _read_required_csv(artifacts / f"{station}_year_split_validation_predictions.csv")
-    stack_tuning = _read_required_csv(artifacts / f"{station}_year_split_stack_tuning.csv")
+    stack_tuning = (
+        _read_required_csv(artifacts / f"{station}_year_split_stack_tuning.csv")
+        if stack_enabled
+        else _read_optional_csv(artifacts / f"{station}_year_split_stack_tuning.csv")
+    )
+    methods = _validated_base_model_methods(base_model_methods)
 
-    config = StationStackingConfig(station_id=station, project_root=root, output_dir=artifacts)
+    config = StationStackingConfig(
+        station_id=station,
+        project_root=root,
+        timing_mode=timing_mode,
+        providers=providers,
+        output_dir=artifacts,
+        feature_version=feature_version,
+        optuna_metric=optuna_metric,
+        target_mode=target_mode,
+        base_model_methods=methods,
+        stack_enabled=stack_enabled,
+    )
     modeling_frame, categorical, numeric = _modeling_frame(features, config)
     if modeling_frame.empty:
         raise ValueError(f"No usable modeling rows found for {station}.")
@@ -86,17 +121,17 @@ def export_station_model_weights(
     selected_by_method = {
         str(row["method"]): row
         for _, row in selected.iterrows()
-        if str(row.get("method", "")) in BASE_MODEL_METHODS
+        if str(row.get("method", "")) in methods
     }
-    missing_methods = [method for method in BASE_MODEL_METHODS if method not in selected_by_method]
+    missing_methods = [method for method in methods if method not in selected_by_method]
     if missing_methods:
         raise ValueError(f"{station} selected hyperparameters missing methods: {missing_methods}")
 
-    for method in BASE_MODEL_METHODS:
+    for method in methods:
         row = selected_by_method[method]
         params = _params_from_selected_row(row)
         estimator = _build_base_model_pipeline(config, fit_categorical, fit_numeric, method, params)
-        estimator.fit(train[feature_names], train[TARGET])
+        estimator.fit(train[feature_names], _model_target_values(train, config))
         base_models[method] = estimator
         base_model_manifests.append(
             {
@@ -108,14 +143,30 @@ def export_station_model_weights(
             }
         )
 
-    stack_model, stack_manifest = _fit_stack_model(validation_predictions, stack_tuning)
+    if stack_enabled:
+        stack_model, stack_manifest = _fit_stack_model(
+            validation_predictions,
+            stack_tuning,
+            metric_col=config.effective_optuna_metric,
+            base_model_methods=methods,
+        )
+        final_model_method = STACK_METHOD
+    else:
+        stack_model, stack_manifest = None, _disabled_stack_manifest()
+        final_model_method = methods[0]
 
     bundle = {
         "schema_version": 1,
         "model_version": model_version,
         "station_id": station,
         "target": TARGET,
+        "target_mode": config.effective_target_mode,
+        "model_target": _model_target_column(config),
+        "observed_high_so_far_column": OBSERVED_HIGH_SO_FAR_COLUMN,
         "training_mode": training_mode,
+        "base_model_methods": tuple(methods),
+        "stack_enabled": bool(stack_enabled),
+        "final_model_method": final_model_method,
         "base_models": base_models,
         "stack_model": stack_model,
         "stack_features": stack_manifest["features"],
@@ -123,6 +174,9 @@ def export_station_model_weights(
         "numeric_features": fit_numeric,
         "feature_names": feature_names,
         "providers": tuple(config.providers),
+        "timing_mode": config.timing_mode,
+        "feature_version": config.effective_feature_version,
+        "optuna_metric": config.effective_optuna_metric,
     }
 
     bundle_path = output_dir / f"{station}_{model_version}.joblib"
@@ -135,9 +189,20 @@ def export_station_model_weights(
         "model_version": model_version,
         "station_id": station,
         "created_at_utc": datetime.now(UTC).isoformat(),
-        "source_pipeline": "notebooks/station_stacking_v2",
+        "source_pipeline": source_pipeline,
         "source_artifact_dir": str(artifacts),
         "bundle_path": str(bundle_path),
+        "model_contract": {
+            "timing_mode": config.timing_mode,
+            "providers": list(config.providers),
+            "feature_version": config.effective_feature_version,
+            "optuna_metric": config.effective_optuna_metric,
+            "target_mode": config.effective_target_mode,
+            "model_target": _model_target_column(config),
+            "base_model_methods": list(methods),
+            "stack_enabled": bool(stack_enabled),
+            "final_model_method": final_model_method,
+        },
         "training": {
             "mode": training_mode,
             "train_start_year": train_start_year,
@@ -146,6 +211,7 @@ def export_station_model_weights(
             "first_contract_date": str(train["contract_date"].min()),
             "last_contract_date": str(train["contract_date"].max()),
             "target": TARGET,
+            "model_target": _model_target_column(config),
         },
         "features": {
             "categorical": fit_categorical,
@@ -156,9 +222,19 @@ def export_station_model_weights(
         "stack_model": stack_manifest,
         "inference": {
             "primary_output": "predictedHighF",
-            "base_prediction_inputs": [f"{method}_predicted_high_f" for method in BASE_MODEL_METHODS],
-            "raw_forecast_inputs": ["hrrr_high_f", "gfs_high_f"],
-            "point_in_time_rule": "HRRR/GFS same-day 11 AM local plus current observation features from notebook v2 feature table.",
+            "final_model_method": final_model_method,
+            "base_prediction_inputs": [f"{method}_predicted_high_f" for method in methods],
+            "base_model_raw_output": _model_target_column(config),
+            "remaining_warmup_target": REMAINING_WARMUP_TARGET,
+            "observed_high_so_far_column": OBSERVED_HIGH_SO_FAR_COLUMN,
+            "base_prediction_transform": _base_prediction_transform(config),
+            "provider_high_inputs": [f"{provider}_high_f" for provider in config.providers],
+            "stack_raw_forecast_inputs": [
+                feature.removesuffix("_predicted_high_f")
+                for feature in stack_manifest["features"]
+                if feature.endswith("_raw_predicted_high_f")
+            ],
+            "point_in_time_rule": _point_in_time_rule(config),
         },
     }
     manifest_path.write_text(json.dumps(_jsonable(manifest), indent=2) + "\n", encoding="utf-8")
@@ -172,6 +248,14 @@ def export_all_station_model_weights(
     model_dir: str | Path | None = None,
     train_years: tuple[int, int] | None = None,
     model_version: str = MODEL_VERSION,
+    timing_mode: str = DEFAULT_TIMING_MODE,
+    providers: tuple[str, ...] = DEFAULT_PROVIDERS,
+    feature_version: str = DEFAULT_FEATURE_VERSION,
+    optuna_metric: str = DEFAULT_OPTUNA_METRIC,
+    target_mode: str = DEFAULT_TARGET_MODE,
+    base_model_methods: tuple[str, ...] = DEFAULT_BASE_MODEL_METHODS,
+    stack_enabled: bool = True,
+    source_pipeline: str = DEFAULT_SOURCE_PIPELINE,
 ) -> list[ExportedModelWeights]:
     exports = [
         export_station_model_weights(
@@ -181,6 +265,14 @@ def export_all_station_model_weights(
             model_dir=model_dir,
             train_years=train_years,
             model_version=model_version,
+            timing_mode=timing_mode,
+            providers=providers,
+            feature_version=feature_version,
+            optuna_metric=optuna_metric,
+            target_mode=target_mode,
+            base_model_methods=base_model_methods,
+            stack_enabled=stack_enabled,
+            source_pipeline=source_pipeline,
         )
         for station in stations
     ]
@@ -188,15 +280,22 @@ def export_all_station_model_weights(
     return exports
 
 
-def _fit_stack_model(validation_predictions: pd.DataFrame, stack_tuning: pd.DataFrame) -> tuple[Any, dict[str, Any]]:
+def _fit_stack_model(
+    validation_predictions: pd.DataFrame,
+    stack_tuning: pd.DataFrame,
+    metric_col: str = DEFAULT_OPTUNA_METRIC,
+    base_model_methods: tuple[str, ...] = DEFAULT_BASE_MODEL_METHODS,
+) -> tuple[Any, dict[str, Any]]:
+    if metric_col not in {"mae_f", "rmse_f"}:
+        raise ValueError("metric_col must be 'mae_f' or 'rmse_f'")
     ok = stack_tuning.loc[stack_tuning["status"].astype(str).str.lower().eq("ok")].copy()
     if ok.empty:
         raise ValueError("No successful ridge stack tuning rows are available.")
-    selected = ok.sort_values(["rmse_f", "param_key"]).iloc[0]
-    stack_methods = list(STACK_FEATURE_SETS["models_plus_raw"])
+    selected = ok.sort_values([metric_col, "param_key"]).iloc[0]
+    stack_methods = [*base_model_methods, "hrrr_raw", "gfs_raw"]
     train_source = _year_split_stack_source_frame(validation_predictions, stack_methods)
     feature_set = str(selected["feature_set"])
-    stack_features = _stack_features_for_set(feature_set)
+    stack_features = _stack_features_for_set(feature_set, base_model_methods)
     train = train_source.dropna(subset=[*stack_features, TARGET]).copy()
     if train.empty:
         raise ValueError("No complete rows are available for fitting the ridge stack.")
@@ -214,6 +313,7 @@ def _fit_stack_model(validation_predictions: pd.DataFrame, stack_tuning: pd.Data
         "fit_intercept": _coerce_bool(selected["fit_intercept"]),
         "validation_rmse_f": _jsonable(selected.get("rmse_f")),
         "validation_mae_f": _jsonable(selected.get("mae_f")),
+        "selection_metric": metric_col,
         "meta_train_rows": int(len(train)),
         "meta_train_first_contract_date": str(train["contract_date"].min()),
         "meta_train_last_contract_date": str(train["contract_date"].max()),
@@ -221,13 +321,67 @@ def _fit_stack_model(validation_predictions: pd.DataFrame, stack_tuning: pd.Data
     return model, manifest
 
 
+def _disabled_stack_manifest() -> dict[str, Any]:
+    return {
+        "method": None,
+        "param_key": "",
+        "feature_set": None,
+        "features": [],
+        "selection_metric": None,
+        "meta_train_rows": 0,
+    }
+
+
 def _read_required_csv(path: Path) -> pd.DataFrame:
     if not path.exists():
-        raise FileNotFoundError(f"Missing required v2 artifact: {path}")
+        raise FileNotFoundError(f"Missing required station-stacking artifact: {path}")
     frame = pd.read_csv(path, low_memory=False)
     if frame.empty:
-        raise ValueError(f"Required v2 artifact is empty: {path}")
+        raise ValueError(f"Required station-stacking artifact is empty: {path}")
     return frame
+
+
+def _read_optional_csv(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path, low_memory=False)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
+
+
+def _validated_base_model_methods(methods: tuple[str, ...]) -> tuple[str, ...]:
+    validated: list[str] = []
+    for raw_method in methods:
+        method = str(raw_method).strip().lower()
+        if not method:
+            continue
+        if method not in BASE_MODEL_METHODS:
+            raise ValueError(f"base_model_methods must be drawn from: {', '.join(BASE_MODEL_METHODS)}")
+        if method not in validated:
+            validated.append(method)
+    if not validated:
+        raise ValueError("base_model_methods must include at least one supported model method")
+    return tuple(validated)
+
+
+def _point_in_time_rule(config: StationStackingConfig) -> str:
+    providers = "/".join(str(provider).upper() for provider in config.providers)
+    if config.effective_feature_version in {"v7", "v8"}:
+        return (
+            f"{providers} {config.timing_mode}; direct NBM included when provider is nbm; "
+            "current-observation features and morning trends must be at or before 11:00 AM local."
+        )
+    return (
+        f"{providers} {config.timing_mode} plus current observation features from "
+        f"feature_version={config.effective_feature_version} feature table."
+    )
+
+
+def _base_prediction_transform(config: StationStackingConfig) -> str:
+    if config.effective_target_mode == TARGET_MODE_DIRECT_HIGH:
+        return "identity"
+    return f"predicted_high_f=max({OBSERVED_HIGH_SO_FAR_COLUMN}, {OBSERVED_HIGH_SO_FAR_COLUMN}+model_output)"
 
 
 def _dump_joblib(value: Any, path: Path) -> None:
@@ -293,7 +447,7 @@ def _parse_train_years(value: str | None) -> tuple[int, int] | None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Export notebook v2 station-stacking model weights.")
+    parser = argparse.ArgumentParser(description="Export station-stacking model weights.")
     parser.add_argument("--project-root", default=".", help="Project root. Defaults to current directory.")
     parser.add_argument(
         "--stations",
@@ -304,9 +458,28 @@ def main() -> None:
     parser.add_argument(
         "--artifact-dir",
         default=None,
-        help="Directory containing station_stacking_v2 CSV artifacts.",
+        help="Directory containing station-stacking CSV artifacts.",
     )
     parser.add_argument("--model-dir", default=None, help="Output directory for model weights.")
+    parser.add_argument("--model-version", default=MODEL_VERSION, help="Model version string for exported files.")
+    parser.add_argument("--timing-mode", default=DEFAULT_TIMING_MODE, help="Timing mode recorded in the bundle.")
+    parser.add_argument(
+        "--providers",
+        nargs="+",
+        default=list(DEFAULT_PROVIDERS),
+        help="Forecast providers required by this bundle.",
+    )
+    parser.add_argument("--feature-version", default=DEFAULT_FEATURE_VERSION, help="Feature version recorded in the bundle.")
+    parser.add_argument("--optuna-metric", default=DEFAULT_OPTUNA_METRIC, help="Metric used to select stack tuning rows.")
+    parser.add_argument("--target-mode", default=DEFAULT_TARGET_MODE, help="Base-model target mode recorded in the bundle.")
+    parser.add_argument(
+        "--base-model-methods",
+        nargs="+",
+        default=list(DEFAULT_BASE_MODEL_METHODS),
+        help="Base model methods to export.",
+    )
+    parser.add_argument("--disable-stack", action="store_true", help="Export base model only without ridge stack.")
+    parser.add_argument("--source-pipeline", default=DEFAULT_SOURCE_PIPELINE, help="Notebook or pipeline source label.")
     parser.add_argument(
         "--train-years",
         default="all_available",
@@ -319,6 +492,15 @@ def main() -> None:
         artifact_dir=args.artifact_dir,
         model_dir=args.model_dir,
         train_years=_parse_train_years(args.train_years),
+        model_version=args.model_version,
+        timing_mode=args.timing_mode,
+        providers=tuple(provider.lower() for provider in args.providers),
+        feature_version=args.feature_version,
+        optuna_metric=args.optuna_metric,
+        target_mode=args.target_mode,
+        base_model_methods=tuple(args.base_model_methods),
+        stack_enabled=not args.disable_stack,
+        source_pipeline=args.source_pipeline,
     )
     for item in exports:
         print(f"{item.station_id}: {item.bundle_path}")

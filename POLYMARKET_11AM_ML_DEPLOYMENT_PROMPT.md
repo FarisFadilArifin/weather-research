@@ -1,5 +1,8 @@
 # Polymarket 11 AM HRRR/GFS ML Deployment Prompt
 
+> Superseded for new bot handoff by `POLYMARKET_11AM_ML_V11_HANDOFF.md`.
+> This older prompt describes the v2-era contract and should not be used as the current serving spec.
+
 You are designing an actual ML deployment pipeline for a Polymarket weather bot. Build a production-grade regression system based on the repository's station-stacking v2 notebook pipeline. It predicts the final airport-station daily high temperature using an 11:00 AM local HRRR/GFS forecast snapshot plus a bounded station-observation window that closes at 11:10 AM local.
 
 The final system should produce the best predicted final high temperature, not a bucket probability. Include uncertainty, but the primary output is `predictedHighF`.

@@ -5,6 +5,7 @@ import logging
 
 from .calibration.sdk_pipeline import (
     TIMING_MODE_SAME_DAY_11AM,
+    TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE,
     add_common_args,
     backfill_direct_nbm,
     sdk_cache_dir_from_args,
@@ -15,7 +16,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Backfill direct NOAA NBM 11 AM remaining-day daily highs")
     add_common_args(parser)
     parser.set_defaults(start_date="2021-01-01")
-    parser.add_argument("--timing-mode", default=TIMING_MODE_SAME_DAY_11AM, choices=[TIMING_MODE_SAME_DAY_11AM])
+    parser.add_argument(
+        "--timing-mode",
+        default=TIMING_MODE_SAME_DAY_11AM,
+        choices=[TIMING_MODE_SAME_DAY_11AM, TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE],
+    )
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--max-batches", type=int)
     parser.add_argument(

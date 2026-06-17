@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -416,19 +417,38 @@ def _extract_nbm_run_points(
         raise RuntimeError("xarray/cfgrib dependencies are required for NBM extraction") from exc
 
     values: dict[str, dict[int, float]] = {station_code: {} for station_code in stations}
-    grid_indexes: dict[str, tuple[int, int]] | None = None
+    grid_indexes: dict[str, tuple[int, int]] | None = _cached_nbm_grid_indexes(settings, stations)
     base_url = settings.get("nws", {}).get("nbm_aws_base_url", "https://noaa-nbm-grib2-pds.s3.amazonaws.com")
     product = settings.get("nws", {}).get("nbm_product", "core")
     suffix = settings.get("nws", {}).get("nbm_domain_suffix", "co")
+    prefetched = _prefetch_nbm_subsets(
+        base_url,
+        issue_utc,
+        fxx_hours,
+        raw_dir,
+        product,
+        suffix,
+        force_refresh,
+        variable,
+        settings,
+    )
     for fxx in fxx_hours:
         try:
-            grib = _download_nbm_subset(base_url, issue_utc, fxx, raw_dir, product, suffix, force_refresh, variable, settings)
+            prefetched_grib = prefetched.get(fxx)
+            if isinstance(prefetched_grib, Exception):
+                raise prefetched_grib
+            grib = (
+                prefetched_grib
+                if isinstance(prefetched_grib, Path)
+                else _download_nbm_subset(base_url, issue_utc, fxx, raw_dir, product, suffix, force_refresh, variable, settings)
+            )
             with xr.open_dataset(grib, engine="cfgrib", backend_kwargs={"indexpath": f"{grib}.cfidx"}) as ds:
                 temp_name = _first_present(ds, ["tmax", "t2m", "t", "unknown"] if variable == NBM_TMAX else ["t2m", "t", "unknown"])
                 if not temp_name:
                     continue
                 if grid_indexes is None:
                     grid_indexes = _nearest_grid_indexes(ds, stations)
+                    _store_nbm_grid_indexes(settings, grid_indexes)
                 for station_code, station in stations.items():
                     y, x = grid_indexes[station_code]
                     point = ds.isel(y=y, x=x)
@@ -440,6 +460,57 @@ def _extract_nbm_run_points(
             logging.warning("Skipping NBM %s %s f%03d: %s", variable, issue_utc, fxx, exc)
             continue
     return values
+
+
+def _prefetch_nbm_subsets(
+    base_url: str,
+    issue_utc: datetime,
+    fxx_hours: list[int],
+    raw_dir: Path,
+    product: str,
+    suffix: str,
+    force_refresh: bool,
+    variable: str,
+    settings: dict[str, Any],
+) -> dict[int, Path | Exception]:
+    workers = _nbm_prefetch_workers(settings, len(fxx_hours))
+    if workers <= 1:
+        return {}
+    prefetched: dict[int, Path | Exception] = {}
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                _download_nbm_subset,
+                base_url,
+                issue_utc,
+                fxx,
+                raw_dir,
+                product,
+                suffix,
+                force_refresh,
+                variable,
+                settings,
+            ): fxx
+            for fxx in fxx_hours
+        }
+        for future in as_completed(futures):
+            fxx = futures[future]
+            try:
+                prefetched[fxx] = future.result()
+            except TransientNbmDownloadError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                prefetched[fxx] = exc
+    return prefetched
+
+
+def _nbm_prefetch_workers(settings: dict[str, Any], fxx_count: int) -> int:
+    value = settings.get("nws", {}).get("nbm_prefetch_workers", 1)
+    try:
+        workers = int(value)
+    except (TypeError, ValueError):
+        workers = 1
+    return min(max(1, workers), max(1, fxx_count))
 
 
 def _extract_nbm_run_feature_points(
@@ -462,7 +533,7 @@ def _extract_nbm_run_feature_points(
         station_code: {fxx: {} for fxx in fxx_hours}
         for station_code in stations
     }
-    grid_indexes: dict[str, tuple[int, int]] | None = None
+    grid_indexes: dict[str, tuple[int, int]] | None = _cached_nbm_grid_indexes(settings, stations)
     base_url = settings.get("nws", {}).get("nbm_aws_base_url", "https://noaa-nbm-grib2-pds.s3.amazonaws.com")
     product = settings.get("nws", {}).get("nbm_product", "core")
     suffix = settings.get("nws", {}).get("nbm_domain_suffix", "co")
@@ -487,6 +558,7 @@ def _extract_nbm_run_feature_points(
                         continue
                     if grid_indexes is None:
                         grid_indexes = _nearest_grid_indexes(ds, stations)
+                        _store_nbm_grid_indexes(settings, grid_indexes)
                     for station_code in stations:
                         y, x = grid_indexes[station_code]
                         values[station_code][fxx][column] = float(ds.isel(y=y, x=x)[value_name].values)
@@ -511,6 +583,24 @@ def _nearest_grid_indexes(dataset: Any, stations: dict[str, dict[str, float]]) -
         y, x = divmod(int(np.nanargmin(distance)), width)
         indexes[station_code] = (y, x)
     return indexes
+
+
+def _cached_nbm_grid_indexes(
+    settings: dict[str, Any],
+    stations: dict[str, dict[str, float]],
+) -> dict[str, tuple[int, int]] | None:
+    cache = settings.get("_nbm_grid_indexes")
+    if not isinstance(cache, dict):
+        return None
+    if not all(station_code in cache for station_code in stations):
+        return None
+    return {station_code: cache[station_code] for station_code in stations}
+
+
+def _store_nbm_grid_indexes(settings: dict[str, Any], indexes: dict[str, tuple[int, int]]) -> None:
+    cache = settings.setdefault("_nbm_grid_indexes", {})
+    if isinstance(cache, dict):
+        cache.update(indexes)
 
 
 def _summarize_nbm_temperature_values(temps_f: list[float], variable: str) -> dict[str, Any]:

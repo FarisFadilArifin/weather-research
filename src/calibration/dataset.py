@@ -8,6 +8,12 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+from .data_quality import (
+    STRICT_QUALITY_ISSUES_COLUMN,
+    STRICT_QUALITY_OK_COLUMN,
+    filter_strict_training_rows,
+    plausible_temperature_mask,
+)
 from .sdk_pipeline import DIRECT_NBM_FILE, SDK_ACTUALS_FILE, SDK_NWP_FILE, SDK_STATION_REGISTRY_FILE, default_sdk_cache_dir
 from .time_rules import forecast_as_of_utc
 
@@ -27,6 +33,7 @@ SAFE_FORECAST_NUMERIC_COLUMNS = [
 
 SAFE_OBSERVED_NUMERIC_COLUMNS = [
     "observed_temp_at_as_of_f",
+    "observed_high_temp_through_as_of_f",
     "observed_dewpoint_at_as_of_f",
     "observed_humidity_at_as_of",
     "observed_wind_speed_at_as_of",
@@ -49,6 +56,9 @@ CALIBRATION_COLUMNS = [
     "horizon_hours",
     "raw_forecast_high_f",
     "actual_high_f",
+    "actual_source",
+    "actual_data_quality_flag",
+    "actual_raw_observation_count",
     "calibration_bias_f",
     "absolute_error_before",
     "squared_error_before",
@@ -80,6 +90,8 @@ CALIBRATION_COLUMNS = [
     "extreme_cold_flag",
     "data_source",
     "source_file_or_url",
+    STRICT_QUALITY_OK_COLUMN,
+    STRICT_QUALITY_ISSUES_COLUMN,
 ]
 
 WEATHER_NUMERIC_COLUMNS = [
@@ -142,20 +154,42 @@ def build_calibration_samples(
         return samples
 
     forecasts = forecasts.dropna(subset=["station_id", "contract_date", "raw_forecast_high_f"]).copy()
+    forecasts = forecasts.loc[plausible_temperature_mask(forecasts["raw_forecast_high_f"])].copy()
+    if forecasts.empty:
+        samples = pd.DataFrame(columns=CALIBRATION_COLUMNS)
+        samples.to_csv(out_dir / "calibration_samples.csv", index=False)
+        return samples
     forecasts["contract_date"] = forecasts["contract_date"].astype(str).str[:10]
     forecasts["provider"] = forecasts["provider"].astype(str).str.lower()
     forecasts["model"] = forecasts["model"].astype(str).str.lower()
     _assert_provider_lineage(forecasts)
     forecasts = _prefer_sdk_nbm_over_direct(forecasts)
 
+    actual_columns = [
+        column
+        for column in [
+            "station_id",
+            "contract_date",
+            "actual_high_f",
+            "actual_source",
+            "actual_data_quality_flag",
+            "actual_raw_observation_count",
+        ]
+        if column in actuals
+    ]
     joined = forecasts.merge(
-        actuals[["station_id", "contract_date", "actual_high_f"]],
+        actuals[actual_columns],
         on=["station_id", "contract_date"],
         how="inner",
     )
     if not current_observations.empty:
         joined = joined.merge(current_observations, on=["station_id", "contract_date"], how="left")
     joined = joined.dropna(subset=["actual_high_f", "raw_forecast_high_f"]).copy()
+    joined = filter_strict_training_rows(joined)
+    if joined.empty:
+        samples = pd.DataFrame(columns=CALIBRATION_COLUMNS)
+        samples.to_csv(out_dir / "calibration_samples.csv", index=False)
+        return samples
     joined["calibration_bias_f"] = joined["actual_high_f"] - joined["raw_forecast_high_f"]
     joined["absolute_error_before"] = joined["calibration_bias_f"].abs()
     joined["squared_error_before"] = joined["calibration_bias_f"] ** 2
@@ -183,10 +217,22 @@ def _load_actuals(root: Path) -> pd.DataFrame:
     missing = required - set(actuals.columns)
     if missing:
         raise ValueError(f"{path} missing required columns: {sorted(missing)}")
-    out = actuals.rename(columns={"station_code": "station_id", "date_local": "contract_date"}).copy()
+    out = actuals.rename(
+        columns={
+            "station_code": "station_id",
+            "date_local": "contract_date",
+            "source": "actual_source",
+            "data_quality_flag": "actual_data_quality_flag",
+            "raw_observation_count": "actual_raw_observation_count",
+        }
+    ).copy()
     out["station_id"] = out["station_id"].astype(str).str.upper()
     out["contract_date"] = out["contract_date"].astype(str).str[:10]
     out["actual_high_f"] = pd.to_numeric(out["actual_high_f"], errors="coerce")
+    for column in ["actual_source", "actual_data_quality_flag", "actual_raw_observation_count"]:
+        if column not in out:
+            out[column] = pd.NA
+    out["actual_raw_observation_count"] = pd.to_numeric(out["actual_raw_observation_count"], errors="coerce")
     return out
 
 
@@ -199,12 +245,22 @@ def _load_sdk_actuals(sdk_dir: Path) -> pd.DataFrame:
     missing = required - set(actuals.columns)
     if missing:
         raise ValueError(f"{path} missing required columns: {sorted(missing)}")
-    out = actuals.copy()
+    out = actuals.rename(
+        columns={
+            "actual_source": "actual_source",
+            "obs_count": "actual_raw_observation_count",
+            "data_quality_flag": "actual_data_quality_flag",
+        }
+    ).copy()
     if "fetch_status" in out.columns:
         out = out.loc[out["fetch_status"].astype(str).str.lower() == "ok"].copy()
     out["station_id"] = out["station_id"].astype(str).str.upper()
     out["contract_date"] = out["contract_date"].astype(str).str[:10]
     out["actual_high_f"] = pd.to_numeric(out["actual_high_f"], errors="coerce")
+    for column in ["actual_source", "actual_data_quality_flag", "actual_raw_observation_count"]:
+        if column not in out:
+            out[column] = pd.NA
+    out["actual_raw_observation_count"] = pd.to_numeric(out["actual_raw_observation_count"], errors="coerce")
     return out.dropna(subset=["actual_high_f"])
 
 

@@ -272,6 +272,8 @@ def summarize_current_observation_for_date(
     observed_at_local = observed_at_utc.astimezone(tz)
     age_minutes = (as_of_utc - observed_at_utc).total_seconds() / 60
     temp_f = _number(row.get("temp_f"))
+    high_temp_f = _max_number(candidates.get("temp_f"))
+    trend_features = _morning_temperature_trend_features(candidates, row)
     dewpoint_f = _number(row.get("dewpoint_f"))
     humidity = _relative_humidity_pct(temp_f, dewpoint_f)
     wind_speed_mph = _kt_to_mph(row.get("wind_speed_kt"))
@@ -285,6 +287,7 @@ def summarize_current_observation_for_date(
         "contract_date": contract_date[:10],
         "timing_mode": timing_mode,
         "observed_temp_at_as_of_f": temp_f,
+        "observed_high_temp_through_as_of_f": high_temp_f,
         "observed_dewpoint_at_as_of_f": dewpoint_f,
         "observed_humidity_at_as_of": humidity,
         "observed_wind_speed_at_as_of": wind_speed_mph,
@@ -303,6 +306,7 @@ def summarize_current_observation_for_date(
         "observed_weather_code_at_as_of": _clean_text(row.get("weather_codes")),
         "observed_precip_recent_at_as_of": _number(row.get("precip_1hr_inches")),
         "observed_snow_depth_at_as_of": _number(row.get("snow_depth_inches")),
+        **trend_features,
         "observed_as_of_time_local": observed_at_local.isoformat(),
         "observed_as_of_time_utc": observed_at_utc.astimezone(UTC).isoformat().replace("+00:00", "Z"),
         "observed_as_of_age_minutes": float(age_minutes),
@@ -335,6 +339,7 @@ def unavailable_current_observation_row(
         "contract_date": contract_date[:10],
         "timing_mode": timing_mode,
         "observed_temp_at_as_of_f": pd.NA,
+        "observed_high_temp_through_as_of_f": pd.NA,
         "observed_dewpoint_at_as_of_f": pd.NA,
         "observed_humidity_at_as_of": pd.NA,
         "observed_wind_speed_at_as_of": pd.NA,
@@ -353,6 +358,10 @@ def unavailable_current_observation_row(
         "observed_weather_code_at_as_of": pd.NA,
         "observed_precip_recent_at_as_of": pd.NA,
         "observed_snow_depth_at_as_of": pd.NA,
+        "observed_temp_change_last_1h_f": pd.NA,
+        "observed_temp_change_last_3h_f": pd.NA,
+        "observed_morning_warmup_rate_f_per_hour": pd.NA,
+        "observed_high_so_far_change_since_9am_f": pd.NA,
         "observed_as_of_time_local": pd.NA,
         "observed_as_of_time_utc": as_of_utc.isoformat().replace("+00:00", "Z"),
         "observed_as_of_age_minutes": pd.NA,
@@ -418,6 +427,79 @@ def _number(value: Any) -> float | Any:
     if math.isnan(number):
         return pd.NA
     return number
+
+
+def _max_number(values: Any) -> float | Any:
+    numeric = pd.to_numeric(values, errors="coerce")
+    if numeric.notna().any():
+        return float(numeric.max())
+    return pd.NA
+
+
+def _morning_temperature_trend_features(frame: pd.DataFrame, selected_row: pd.Series) -> dict[str, Any]:
+    observed_at_local = pd.Timestamp(selected_row.get("observed_at_local"))
+    temp_now = _number(selected_row.get("temp_f"))
+    if pd.isna(observed_at_local) or pd.isna(temp_now):
+        return {
+            "observed_temp_change_last_1h_f": pd.NA,
+            "observed_temp_change_last_3h_f": pd.NA,
+            "observed_morning_warmup_rate_f_per_hour": pd.NA,
+            "observed_high_so_far_change_since_9am_f": pd.NA,
+        }
+
+    temp_last_1h = _temp_at_or_before(frame, observed_at_local - timedelta(hours=1))
+    temp_last_3h = _temp_at_or_before(frame, observed_at_local - timedelta(hours=3))
+    nine_am = observed_at_local.normalize().replace(hour=9)
+    temp_at_9am = _temp_at_or_before(frame, nine_am)
+    high_so_far_at_9am = _high_temp_at_or_before(frame, nine_am)
+    high_so_far_now = _max_number(
+        frame.loc[frame["observed_at_local"] <= observed_at_local, "temp_f"]
+    )
+
+    hours_since_9am = (observed_at_local - nine_am).total_seconds() / 3600
+    morning_warmup_rate = pd.NA
+    if not pd.isna(temp_at_9am) and hours_since_9am > 0:
+        morning_warmup_rate = (float(temp_now) - float(temp_at_9am)) / hours_since_9am
+
+    high_so_far_change = pd.NA
+    if not pd.isna(high_so_far_now) and not pd.isna(high_so_far_at_9am):
+        high_so_far_change = float(high_so_far_now) - float(high_so_far_at_9am)
+
+    return {
+        "observed_temp_change_last_1h_f": _difference(temp_now, temp_last_1h),
+        "observed_temp_change_last_3h_f": _difference(temp_now, temp_last_3h),
+        "observed_morning_warmup_rate_f_per_hour": morning_warmup_rate,
+        "observed_high_so_far_change_since_9am_f": high_so_far_change,
+    }
+
+
+def _temp_at_or_before(frame: pd.DataFrame, cutoff_local: pd.Timestamp) -> float | Any:
+    if frame.empty or "observed_at_local" not in frame:
+        return pd.NA
+    prior = frame.loc[frame["observed_at_local"] <= cutoff_local].copy()
+    if prior.empty:
+        return pd.NA
+    prior["temp_f"] = pd.to_numeric(prior.get("temp_f"), errors="coerce")
+    prior = prior.dropna(subset=["temp_f"])
+    if prior.empty:
+        return pd.NA
+    prior = prior.sort_values("observed_at_local", ascending=True)
+    return float(prior.iloc[-1]["temp_f"])
+
+
+def _high_temp_at_or_before(frame: pd.DataFrame, cutoff_local: pd.Timestamp) -> float | Any:
+    if frame.empty or "observed_at_local" not in frame:
+        return pd.NA
+    prior = frame.loc[frame["observed_at_local"] <= cutoff_local].copy()
+    if prior.empty:
+        return pd.NA
+    return _max_number(prior.get("temp_f"))
+
+
+def _difference(current: Any, previous: Any) -> float | Any:
+    if pd.isna(current) or pd.isna(previous):
+        return pd.NA
+    return float(current) - float(previous)
 
 
 def _clean_text(value: Any) -> str | Any:
