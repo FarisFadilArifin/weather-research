@@ -4,6 +4,9 @@ The current baseline notebook workflow is `station_stacking_v2`. The precipitati
 
 ## Current
 
+For a repository-wide audit of all raw pulls, processed tables, calibration
+datasets, exports, and model artifacts, use `notebooks/exploratory_analysis.ipynb`.
+
 Use these for the active same-day 11 AM station-stacking research path:
 
 ```text
@@ -66,10 +69,46 @@ The v7 notebooks set Optuna to 50 base-model trials and 50 stack trials with 20 
 
 V8 is not the production default unless its 2026 OOF MAE, bucket accuracy, and large-miss behavior beat the v7 ridge-stack benchmark.
 
+## V11 Wunderground Settlement Rerun
+
+`notebooks/station_stacking_v11_settlement/` keeps the exact v11 model and feature contract for the full v11 station set, but uses settlement-first daily highs backed by exact Wunderground/Weather Company airport-station history. It writes isolated artifacts to `data/calibration/station_stacking_v11_settlement` so the original v11 benchmark remains unchanged.
+
+## V11 Settlement Fix Temperature Experiment
+
+`notebooks/station_stacking_v11_settlement_fix/` contains KATL and KDAL settlement-first notebooks that retain the v11 remaining-warmup model contract, apply a train-fold-only 3% feature-missingness gate, and add an expanded 11 AM forecast-temperature-versus-observation feature family. The notebooks run one experimental configuration, compare against the existing v11 settlement artifacts on common dates, and do not export model weights by default. An explicit KDAL candidate export was run on 2026-07-16 and written to `data/calibration/station_stacking_v11_settlement_fix/model_weights`; its manifest refit cutoff is 2026-06-21. This is a research candidate, not a live promotion.
+
+## V12 Settlement-First Guarded Blend
+
+`notebooks/station_stacking_v12/` is the current post-June-21 research path. It keeps the v11 live-safe GFS/HRRR/direct-NBM feature lineage, uses settlement-first labels, evaluates 1F/2F/3F provider-mean capped stack predictions, and writes artifacts to `data/calibration/station_stacking_v12`.
+
+V12 candidate bundles are research exports only until `v12_candidate_model_handoff.md` passes the all-9-station 2026 provider-mean gate.
+
+## V14 Curated Weather Experiment
+
+`notebooks/station_stacking_v14/` is a controlled successor to v13. It keeps the v11 remaining-warmup, Huber, and ridge-stack lineage, computes weather aggregates from the enriched forecast caches, then trains only on the v11 feature base plus a curated aggregate weather allowlist that passes coverage checks. Artifacts are written to `data/calibration/station_stacking_v14`.
+
+Use v14 to test whether precipitation, cloud, and forecast-temperature-at-as-of aggregates help without admitting raw provider weather fields or provider-difference feature sprawl.
+
+## V19 Dense Settlement Modal-Bucket Experiment
+
+V19 is split by method and station over the same dense v11 settlement backbone:
+
+- `notebooks/station_stacking_v19/stacking_KATL_v19_b.ipynb`
+- `notebooks/station_stacking_v19/stacking_KDAL_v19_b.ipynb`
+- `notebooks/station_stacking_v19/stacking_KATL_v19_c.ipynb`
+- `notebooks/station_stacking_v19/stacking_KDAL_v19_c.ipynb`
+
+Each uses 30 base-model Optuna trials with 15 startup trials and 30 stack trials with 15 stack startup trials. Both methods use a train-only 3% feature-missingness gate and share the clean study path `data/calibration/station_stacking_v19_patched/{STATION}/dense_backbone`. V19-C uses cumulative-threshold ordinal logistic regression, empirically shaped censored tails, and strict forward-nested tuning. Method outputs remain separate under `v19_b` and `v19_c`; neither notebook exports a production bundle before promotion review. Use `scripts/run_station_stacking_v19_patched.py` to execute KATL then KDAL sequentially without concurrent study writes.
+
+## V20 Peak-Timing Experiment
+
+`notebooks/station_stacking_v20_peak_timing/` contains the single KATL/KDAL V20 arm. It combines the V11 Settlement Fix temperature features with curated live-safe HRRR/NBM afternoon peak, solar, cloud, and precipitation aggregates; uses Wunderground-only highs; and evaluates four expanding validation folds from 2022 through 2025 before the 2026 holdout. Its readiness cells can audit an in-progress shard pull but stop before tuning when station-year peak or target coverage exceeds 3% missingness. Artifacts are written to `data/calibration/station_stacking_v20_peak_timing`, and notebook model export remains disabled by default. An explicit KATL candidate export was run on 2026-07-16 and written to `data/calibration/station_stacking_v20_peak_timing/model_weights`; its manifest refit cutoff is 2026-06-21. Complete the intended July 14 Wunderground horizon and re-export before promotion review.
+
+`notebooks/station_stacking_v20_kdal_fix/` is an isolated KDAL-only patch. It retains NBM temperature timing and HRRR solar/cloud/precipitation physics, excludes the HRRR temperature-curve family, and adds a capped monthly residual correction learned from forward 2023–2025 OOF stack predictions. It writes to `data/calibration/station_stacking_v20_kdal_fix`; KATL and the original V20 artifacts remain unchanged.
+
 ## Legacy / Reference
 
 - `notebooks/station_stacking/`: older station-stacking notebooks retained for comparison.
 - `notebooks/calibration_ml_walkforward.ipynb`: legacy additive-bias calibration workflow.
-- `notebooks/exploratory_analysis.ipynb`: exploratory analysis and one-off inspection.
 
 When adding new notebooks, use a short markdown cell at the top that states whether the notebook is current, experimental, or legacy.

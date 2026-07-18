@@ -22,7 +22,8 @@ DEFAULT_SDK_PROVIDERS = ("hrrr", "gfs")
 DEFAULT_SDK_START_DATE = "2021-01-01"
 
 CURRENT_OBSERVATION_FILE = "sdk_current_observations_11am.csv"
-CURRENT_OBSERVATION_CACHE_PATTERN = "sdk_current_obs_*/sdk_current_observations_11am.csv"
+CURRENT_OBSERVATION_9AM_FILE = "sdk_current_observations_9am.csv"
+CURRENT_OBSERVATION_CACHE_PATTERN = "sdk_current_obs_*/sdk_current_observations_*.csv"
 
 SAFE_FORECAST_NUMERIC_COLUMNS = [
     "dewpoint_mean_f",
@@ -124,7 +125,7 @@ def build_calibration_samples(
         actuals = _load_sdk_actuals(sdk_dir)
         station_meta = _load_sdk_station_meta(root, sdk_dir)
         forecast_frames = [_load_sdk_nwp_cache(sdk_dir, station_meta)]
-        current_observations = _load_current_observations(sdk_dir)
+        current_observations = _load_current_observations(sdk_dir, timing_modes=timing_modes)
         if _include_direct_nbm_cache():
             forecast_frames.append(_load_direct_nbm_cache(sdk_dir, station_meta))
     elif source_mode == "legacy":
@@ -264,8 +265,15 @@ def _load_sdk_actuals(sdk_dir: Path) -> pd.DataFrame:
     return out.dropna(subset=["actual_high_f"])
 
 
-def _load_current_observations(sdk_dir: Path) -> pd.DataFrame:
-    paths = _cache_paths(sdk_dir, CURRENT_OBSERVATION_FILE, CURRENT_OBSERVATION_CACHE_PATTERN)
+def _load_current_observations(
+    sdk_dir: Path,
+    timing_modes: set[str] | None = None,
+) -> pd.DataFrame:
+    paths = set(_cache_paths(sdk_dir, CURRENT_OBSERVATION_FILE, CURRENT_OBSERVATION_CACHE_PATTERN))
+    direct_9am = sdk_dir / CURRENT_OBSERVATION_9AM_FILE
+    if direct_9am.exists():
+        paths.add(direct_9am)
+    paths = sorted(paths)
     if not paths:
         return pd.DataFrame(columns=["station_id", "contract_date", *SAFE_OBSERVED_NUMERIC_COLUMNS])
     frames: list[pd.DataFrame] = []
@@ -288,8 +296,9 @@ def _load_current_observations(sdk_dir: Path) -> pd.DataFrame:
     out["contract_date"] = out["contract_date"].astype(str).str[:10]
     out["timing_mode"] = out["timing_mode"].astype(str).str.lower()
     out["observed_fetch_status"] = out["observed_fetch_status"].astype(str).str.lower()
+    wanted_timing_modes = timing_modes or {"same_day_11am"}
     out = out.loc[
-        out["timing_mode"].eq("same_day_11am")
+        out["timing_mode"].isin(wanted_timing_modes)
         & out["observed_fetch_status"].eq("ok")
     ].copy()
     if out.empty:

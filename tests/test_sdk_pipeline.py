@@ -294,6 +294,78 @@ def test_same_day_11am_live_safe_cycle_selection_matches_1115_decision_table(mon
         assert cycle + timedelta(hours=min(fxx)) == as_of
 
 
+def test_same_day_9am_live_safe_cycle_selection_matches_0915_decision_table(monkeypatch) -> None:
+    def fake_cycle_hours(model: str) -> tuple[int, ...]:
+        return (0, 6, 12, 18) if model == "gfs" else tuple(range(24))
+
+    monkeypatch.setattr(sdk_pipeline, "model_cycle_hours", fake_cycle_hours)
+
+    cases = [
+        ("KATL", "America/New_York", "hrrr", datetime(2026, 6, 15, 13, tzinfo=UTC), datetime(2026, 6, 15, 12, tzinfo=UTC), 1),
+        ("KATL", "America/New_York", "gfs", datetime(2026, 6, 15, 13, tzinfo=UTC), datetime(2026, 6, 15, 6, tzinfo=UTC), 7),
+        ("KATL", "America/New_York", "nbm", datetime(2026, 6, 15, 13, tzinfo=UTC), datetime(2026, 6, 15, 11, tzinfo=UTC), 2),
+        ("KDAL", "America/Chicago", "hrrr", datetime(2026, 6, 15, 14, tzinfo=UTC), datetime(2026, 6, 15, 13, tzinfo=UTC), 1),
+        ("KDAL", "America/Chicago", "gfs", datetime(2026, 6, 15, 14, tzinfo=UTC), datetime(2026, 6, 15, 6, tzinfo=UTC), 8),
+        ("KDAL", "America/Chicago", "nbm", datetime(2026, 6, 15, 14, tzinfo=UTC), datetime(2026, 6, 15, 12, tzinfo=UTC), 2),
+        ("KMIA", "America/New_York", "hrrr", datetime(2026, 6, 15, 13, tzinfo=UTC), datetime(2026, 6, 15, 12, tzinfo=UTC), 1),
+        ("KMIA", "America/New_York", "gfs", datetime(2026, 6, 15, 13, tzinfo=UTC), datetime(2026, 6, 15, 6, tzinfo=UTC), 7),
+        ("KMIA", "America/New_York", "nbm", datetime(2026, 6, 15, 13, tzinfo=UTC), datetime(2026, 6, 15, 11, tzinfo=UTC), 2),
+        ("KSEA", "America/Los_Angeles", "hrrr", datetime(2026, 6, 15, 16, tzinfo=UTC), datetime(2026, 6, 15, 15, tzinfo=UTC), 1),
+        ("KSEA", "America/Los_Angeles", "gfs", datetime(2026, 6, 15, 16, tzinfo=UTC), datetime(2026, 6, 15, 6, tzinfo=UTC), 10),
+        ("KSEA", "America/Los_Angeles", "nbm", datetime(2026, 6, 15, 16, tzinfo=UTC), datetime(2026, 6, 15, 14, tzinfo=UTC), 2),
+    ]
+    for _station_id, timezone, model, expected_as_of, expected_cycle, expected_min_fxx in cases:
+        as_of = sdk_pipeline.forecast_as_of_for_timing(
+            "2026-06-15",
+            timezone,
+            "same_day_9am_live_safe",
+        )
+        start, end = sdk_pipeline.forecast_window_for_timing(
+            "2026-06-15",
+            timezone,
+            "same_day_9am_live_safe",
+            as_of,
+        )
+        cycle, fxx = sdk_pipeline.choose_cycle(
+            model,
+            "2026-06-15",
+            timezone,
+            as_of,
+            timing_mode="same_day_9am_live_safe",
+        )
+        assert as_of == expected_as_of
+        assert start == expected_as_of
+        assert cycle == expected_cycle
+        assert min(fxx) == expected_min_fxx
+        assert len(fxx) == 15
+        assert cycle + timedelta(hours=min(fxx)) == as_of
+        assert all(cycle + timedelta(hours=hour) >= start for hour in fxx)
+        assert all(cycle + timedelta(hours=hour) < end for hour in fxx)
+
+
+def test_same_day_9am_live_safe_forecast_as_of_handles_winter_offsets() -> None:
+    cases = [
+        ("America/New_York", datetime(2026, 1, 15, 14, tzinfo=UTC)),
+        ("America/Chicago", datetime(2026, 1, 15, 15, tzinfo=UTC)),
+        ("America/Los_Angeles", datetime(2026, 1, 15, 17, tzinfo=UTC)),
+    ]
+    for timezone, expected_as_of in cases:
+        as_of = sdk_pipeline.forecast_as_of_for_timing(
+            "2026-01-15",
+            timezone,
+            "same_day_9am_live_safe",
+        )
+        start, end = sdk_pipeline.forecast_window_for_timing(
+            "2026-01-15",
+            timezone,
+            "same_day_9am_live_safe",
+            as_of,
+        )
+        assert as_of == expected_as_of
+        assert start == expected_as_of
+        assert len(sdk_pipeline.forecast_hours_for_utc_window(as_of, start, end)) == 15
+
+
 def test_same_day_11am_window_excludes_pre_11am_hours(monkeypatch) -> None:
     monkeypatch.setattr(sdk_pipeline, "model_cycle_hours", lambda model: tuple(range(24)))
     as_of = sdk_pipeline.forecast_as_of_for_timing("2026-07-15", "America/New_York", "same_day_11am")
@@ -482,7 +554,7 @@ def test_batched_nwp_fetch_keeps_partial_hours_when_one_fxx_fails(monkeypatch) -
     assert rows[0]["forecast_hour_missing"] == "2"
 
 
-def test_nbm_uses_subprocess_fetch_by_default() -> None:
+def test_nbm_uses_direct_fetch_by_default() -> None:
     request = sdk_pipeline.NwpRequest(
         station_id="KATL",
         station_name="Atlanta",
@@ -499,10 +571,10 @@ def test_nbm_uses_subprocess_fetch_by_default() -> None:
         forecast_window_end=datetime(2025, 1, 2, 5, tzinfo=UTC),
     )
 
-    assert sdk_pipeline._use_nbm_subprocess_fetch(request)
+    assert not sdk_pipeline._use_nbm_subprocess_fetch(request)
 
 
-def test_hrrr_uses_subprocess_fetch_by_default() -> None:
+def test_hrrr_uses_direct_fetch_by_default_and_supports_subprocess_override(monkeypatch) -> None:
     request = sdk_pipeline.NwpRequest(
         station_id="KATL",
         station_name="Atlanta",
@@ -519,7 +591,13 @@ def test_hrrr_uses_subprocess_fetch_by_default() -> None:
         forecast_window_end=datetime(2025, 1, 2, 5, tzinfo=UTC),
     )
 
+    assert not sdk_pipeline._use_nwp_subprocess_fetch(request)
+
+    monkeypatch.setenv("WEATHER_RESEARCH_NWP_SUBPROCESS", "1")
     assert sdk_pipeline._use_nwp_subprocess_fetch(request)
+
+    monkeypatch.setenv("WEATHER_RESEARCH_HRRR_SUBPROCESS", "0")
+    assert not sdk_pipeline._use_nwp_subprocess_fetch(request)
 
 
 def test_nbm_variable_patch_uses_lean_stable_feature_set_by_default(monkeypatch) -> None:

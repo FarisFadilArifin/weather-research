@@ -96,6 +96,54 @@ def test_current_observation_adds_morning_temperature_trends() -> None:
     assert row["observed_high_so_far_change_since_9am_f"] == 12.0
 
 
+def test_current_observation_9am_uses_latest_row_inside_window() -> None:
+    rows = [
+        {"station_code": "ATL", "observed_at": "2024-01-01T13:30:00Z", "source": "iem", "temp_f": 55.0},
+        {"station_code": "ATL", "observed_at": "2024-01-01T13:49:00Z", "source": "iem", "temp_f": 40.0},
+        {"station_code": "ATL", "observed_at": "2024-01-01T13:55:00Z", "source": "iem", "temp_f": 45.0},
+        {"station_code": "ATL", "observed_at": "2024-01-01T14:05:00Z", "source": "iem", "temp_f": 50.0},
+        {"station_code": "ATL", "observed_at": "2024-01-01T14:11:00Z", "source": "iem", "temp_f": 99.0},
+    ]
+
+    out = summarize_current_observations(
+        rows,
+        station_id="KATL",
+        station_name="Atlanta/Hartsfield-Jackson Intl",
+        airport_name="Atlanta/Hartsfield-Jackson Intl",
+        timezone="America/New_York",
+        contract_dates=["2024-01-01"],
+        timing_mode="same_day_9am_live_safe",
+        as_of_hour_local=9,
+    )
+
+    row = out[0]
+    assert row["observed_fetch_status"] == "ok"
+    assert row["observed_temp_at_as_of_f"] == 50.0
+    assert row["observed_high_temp_through_as_of_f"] == 55.0
+    assert row["observed_as_of_time_local"] == "2024-01-01T09:05:00-05:00"
+    assert row["observed_as_of_age_minutes"] == -5.0
+
+
+def test_current_observation_9am_writes_unavailable_when_window_is_empty() -> None:
+    out = summarize_current_observations(
+        [
+            {"station_code": "ATL", "observed_at": "2024-01-01T13:49:00Z", "source": "iem", "temp_f": 55.0},
+            {"station_code": "ATL", "observed_at": "2024-01-01T14:11:00Z", "source": "iem", "temp_f": 60.0},
+        ],
+        station_id="KATL",
+        station_name="Atlanta/Hartsfield-Jackson Intl",
+        airport_name="Atlanta/Hartsfield-Jackson Intl",
+        timezone="America/New_York",
+        contract_dates=["2024-01-01"],
+        timing_mode="same_day_9am_live_safe",
+        as_of_hour_local=9,
+    )
+
+    assert out[0]["observed_fetch_status"] == "unavailable"
+    assert pd.isna(out[0]["observed_temp_at_as_of_f"])
+    assert pd.isna(out[0]["observed_high_temp_through_as_of_f"])
+
+
 def test_current_observation_trends_are_missing_without_history() -> None:
     out = summarize_current_observations(
         [

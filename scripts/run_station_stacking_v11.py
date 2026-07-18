@@ -10,6 +10,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.calibration.station_stacking import (  # noqa: E402
+    TARGET_SOURCE_IEM_HOURLY,
     TARGET_STATIONS,
     YEAR_SPLIT_EXPANDING_FOLDS,
     StationStackingConfig,
@@ -43,6 +44,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fast-mode", action="store_true", help="Use shortened fast-mode validation blocks.")
     parser.add_argument("--quiet-optuna", action="store_true", help="Reduce Optuna logging.")
     parser.add_argument(
+        "--target-source",
+        default=TARGET_SOURCE_IEM_HOURLY,
+        choices=("iem_hourly", "settlement_first"),
+        help="Daily-high label source; use settlement_first for Wunderground-backed labels.",
+    )
+    parser.add_argument(
         "--skip-export",
         action="store_true",
         help="Run training only and do not export joblib model weights.",
@@ -75,6 +82,7 @@ def main() -> None:
             optuna_verbose=not args.quiet_optuna,
             feature_version=FEATURE_VERSION,
             target_mode=TARGET_MODE,
+            target_source=args.target_source,
             hyperparameter_space="wide",
             base_model_methods=BASE_MODEL_METHODS,
             stack_enabled=True,
@@ -98,6 +106,7 @@ def main() -> None:
                 feature_version=FEATURE_VERSION,
                 optuna_metric=OPTUNA_METRIC,
                 target_mode=TARGET_MODE,
+                target_source=args.target_source,
                 base_model_methods=BASE_MODEL_METHODS,
                 stack_enabled=True,
                 source_pipeline="scripts/run_station_stacking_v11.py",

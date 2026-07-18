@@ -15,6 +15,7 @@ from .calibration.sdk_pipeline import (
     STATION_METADATA,
     TARGET_STATIONS,
     TIMING_MODE_SAME_DAY_11AM,
+    TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE,
     date_range,
     local_datetime_utc,
     resolve_contract_end,
@@ -22,8 +23,13 @@ from .calibration.sdk_pipeline import (
 
 
 CURRENT_OBSERVATIONS_FILE = "sdk_current_observations_11am.csv"
+CURRENT_OBSERVATIONS_9AM_FILE = "sdk_current_observations_9am.csv"
 
 CACHE_KEYS = ["station_id", "contract_date", "timing_mode"]
+SUPPORTED_CURRENT_OBSERVATION_TIMING_MODES = {
+    TIMING_MODE_SAME_DAY_11AM,
+    TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE,
+}
 
 
 def backfill_sdk_current_observations(
@@ -43,11 +49,20 @@ def backfill_sdk_current_observations(
     sleep_between_chunks: float = 0.0,
     max_chunks: int | None = None,
 ) -> pd.DataFrame:
-    if timing_mode != TIMING_MODE_SAME_DAY_11AM:
-        raise ValueError("Current observation features currently support timing_mode='same_day_11am' only")
+    if timing_mode not in SUPPORTED_CURRENT_OBSERVATION_TIMING_MODES:
+        raise ValueError(
+            "Current observation features support timing_mode='same_day_11am' "
+            "or 'same_day_9am_live_safe' only"
+        )
+    expected_as_of_hour = 9 if timing_mode == TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE else 11
+    if int(as_of_hour_local) != expected_as_of_hour:
+        raise ValueError(
+            f"{timing_mode!r} requires as_of_hour_local={expected_as_of_hour}; "
+            f"got {as_of_hour_local}"
+        )
     out_dir = Path(sdk_cache_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = out_dir / CURRENT_OBSERVATIONS_FILE
+    cache_path = out_dir / current_observation_cache_file(timing_mode, as_of_hour_local)
     existing = _load_existing(cache_path)
     completed = set() if force else _completed_keys(existing, retry_unavailable=retry_unavailable)
     station_ids = [str(s).upper() for s in (stations or TARGET_STATIONS)]
@@ -129,6 +144,12 @@ def backfill_sdk_current_observations(
             if sleep_between_chunks > 0:
                 time.sleep(sleep_between_chunks)
     return existing
+
+
+def current_observation_cache_file(timing_mode: str, as_of_hour_local: int) -> str:
+    if timing_mode == TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE or int(as_of_hour_local) == 9:
+        return CURRENT_OBSERVATIONS_9AM_FILE
+    return CURRENT_OBSERVATIONS_FILE
 
 
 def fetch_sdk_raw_observations_with_retries(
@@ -251,11 +272,23 @@ def summarize_current_observation_for_date(
     day = date.fromisoformat(contract_date[:10])
     tz = ZoneInfo(timezone)
     day_start_utc = datetime.combine(day, datetime.min.time(), tzinfo=tz).astimezone(UTC)
-    candidates = frame.loc[
+    same_day = frame.loc[
         (frame["observed_at_utc"] >= pd.Timestamp(day_start_utc))
-        & (frame["observed_at_utc"] <= pd.Timestamp(as_of_utc))
         & (frame["observed_at_local"].dt.date == day)
     ].copy()
+    if _uses_observation_window(timing_mode):
+        window_start_utc, window_end_utc = _observation_window_utc(contract_date, timezone, as_of_hour_local)
+        candidates = same_day.loc[
+            (same_day["observed_at_utc"] >= pd.Timestamp(window_start_utc))
+            & (same_day["observed_at_utc"] <= pd.Timestamp(window_end_utc))
+        ].copy()
+        unavailable_reason = (
+            f"No SDK observation inside local {as_of_hour_local:02d}:00 "
+            "observation window"
+        )
+    else:
+        candidates = same_day.loc[same_day["observed_at_utc"] <= pd.Timestamp(as_of_utc)].copy()
+        unavailable_reason = "No SDK observation at or before local as-of time"
     if candidates.empty:
         return unavailable_current_observation_row(
             station_id=station_id,
@@ -265,15 +298,16 @@ def summarize_current_observation_for_date(
             contract_date=contract_date,
             timing_mode=timing_mode,
             as_of_hour_local=as_of_hour_local,
-            reason="No SDK observation at or before local as-of time",
+            reason=unavailable_reason,
         )
     row = candidates.sort_values(["observed_at_utc", "source"], na_position="first").iloc[-1]
     observed_at_utc = pd.Timestamp(row["observed_at_utc"]).to_pydatetime()
     observed_at_local = observed_at_utc.astimezone(tz)
     age_minutes = (as_of_utc - observed_at_utc).total_seconds() / 60
+    history = same_day.loc[same_day["observed_at_utc"] <= pd.Timestamp(observed_at_utc)].copy()
     temp_f = _number(row.get("temp_f"))
-    high_temp_f = _max_number(candidates.get("temp_f"))
-    trend_features = _morning_temperature_trend_features(candidates, row)
+    high_temp_f = _max_number(history.get("temp_f"))
+    trend_features = _morning_temperature_trend_features(history, row)
     dewpoint_f = _number(row.get("dewpoint_f"))
     humidity = _relative_humidity_pct(temp_f, dewpoint_f)
     wind_speed_mph = _kt_to_mph(row.get("wind_speed_kt"))
@@ -318,6 +352,19 @@ def summarize_current_observation_for_date(
         "observed_fetch_status": "ok",
         "observed_unavailable_reason": pd.NA,
     }
+
+
+def _uses_observation_window(timing_mode: str) -> bool:
+    return timing_mode == TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE
+
+
+def _observation_window_utc(
+    contract_date: str,
+    timezone: str,
+    as_of_hour_local: int,
+) -> tuple[datetime, datetime]:
+    as_of = local_datetime_utc(contract_date, timezone, as_of_hour_local)
+    return as_of - timedelta(minutes=10), as_of + timedelta(minutes=10)
 
 
 def unavailable_current_observation_row(

@@ -150,17 +150,24 @@ TIMING_MODE_STRICT_6AM = "strict_6am"
 TIMING_MODE_FRESH_AFTER_6AM = "fresh_after_6am"
 TIMING_MODE_SAME_DAY_11AM = "same_day_11am"
 TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE = "same_day_11am_live_safe"
+TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE = "same_day_9am_live_safe"
 TIMING_MODES = [
     TIMING_MODE_STRICT_6AM,
     TIMING_MODE_FRESH_AFTER_6AM,
     TIMING_MODE_SAME_DAY_11AM,
     TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE,
+    TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE,
 ]
 TIMING_MODE_SOURCE_LABELS = {
     TIMING_MODE_STRICT_6AM: "strict_6am",
     TIMING_MODE_FRESH_AFTER_6AM: "fresh_after_6am_remaining_day",
     TIMING_MODE_SAME_DAY_11AM: "same_day_11am_remaining_day",
     TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE: "same_day_11am_live_safe_remaining_day",
+    TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE: "same_day_9am_live_safe_remaining_day",
+}
+LIVE_SAFE_TIMING_LOCAL_HOURS = {
+    TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE: 11,
+    TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE: 9,
 }
 LIVE_SAFE_DECISION_DELAY_MINUTES = 15
 LIVE_SAFE_MODEL_LAG_MINUTES = {"hrrr": 75, "gfs": 270, "nbm": 120}
@@ -241,6 +248,8 @@ def forecast_as_of_for_timing(contract_date: str | date, timezone: str, timing_m
         return local_datetime_utc(contract_date, timezone, 7)
     if timing_mode in {TIMING_MODE_SAME_DAY_11AM, TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE}:
         return local_datetime_utc(contract_date, timezone, 11)
+    if timing_mode == TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE:
+        return local_datetime_utc(contract_date, timezone, 9)
     if timing_mode == TIMING_MODE_STRICT_6AM:
         return forecast_as_of_utc(contract_date, timezone)
     raise ValueError(f"Unsupported timing_mode: {timing_mode}")
@@ -257,6 +266,7 @@ def forecast_window_for_timing(
         TIMING_MODE_FRESH_AFTER_6AM,
         TIMING_MODE_SAME_DAY_11AM,
         TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE,
+        TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE,
     }:
         return forecast_as_of.astimezone(UTC), end_utc
     if timing_mode == TIMING_MODE_STRICT_6AM:
@@ -321,13 +331,16 @@ def choose_fresh_after_6am_cycle(
     return cycle, fxx_hours, forecast_as_of, forecast_as_of, local_midnight
 
 
-def choose_same_day_11am_live_safe_cycle(
+def choose_same_day_live_safe_cycle(
     model: str,
     contract_date: str,
     timezone: str,
+    timing_mode: str,
 ) -> tuple[datetime | None, tuple[int, ...], datetime, datetime, datetime]:
+    if timing_mode not in LIVE_SAFE_TIMING_LOCAL_HOURS:
+        raise ValueError(f"Unsupported live-safe timing_mode: {timing_mode}")
     model = model.lower()
-    forecast_as_of = forecast_as_of_for_timing(contract_date, timezone, TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE)
+    forecast_as_of = forecast_as_of_for_timing(contract_date, timezone, timing_mode)
     _, local_midnight = local_day_utc_bounds(contract_date, timezone)
     decision_time = forecast_as_of + timedelta(minutes=LIVE_SAFE_DECISION_DELAY_MINUTES)
     lag_minutes = LIVE_SAFE_MODEL_LAG_MINUTES.get(model, MODEL_LAG_MINUTES.get(model, 120))
@@ -350,6 +363,32 @@ def choose_same_day_11am_live_safe_cycle(
             continue
         return cycle, fxx_hours, forecast_as_of, forecast_as_of, local_midnight
     return None, (), forecast_as_of, forecast_as_of, local_midnight
+
+
+def choose_same_day_11am_live_safe_cycle(
+    model: str,
+    contract_date: str,
+    timezone: str,
+) -> tuple[datetime | None, tuple[int, ...], datetime, datetime, datetime]:
+    return choose_same_day_live_safe_cycle(
+        model,
+        contract_date,
+        timezone,
+        TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE,
+    )
+
+
+def choose_same_day_9am_live_safe_cycle(
+    model: str,
+    contract_date: str,
+    timezone: str,
+) -> tuple[datetime | None, tuple[int, ...], datetime, datetime, datetime]:
+    return choose_same_day_live_safe_cycle(
+        model,
+        contract_date,
+        timezone,
+        TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE,
+    )
 
 
 def choose_direct_nbm_13z_live_safe_cycle(
@@ -583,6 +622,7 @@ def backfill_sdk_nwp(
     cache_path = out_dir / SDK_NWP_FILE
     existing = _load_existing(cache_path)
     completed = _completed_nwp_keys(existing, require_weather_features=include_weather_features) if not force else set()
+    existing_ok_keys = _ok_nwp_keys(existing)
     dates = date_range(start_date, resolve_contract_end(end_date))
     requests = plan_nwp_requests(
         station_meta,
@@ -610,6 +650,8 @@ def backfill_sdk_nwp(
                     fxx_workers=fxx_workers,
                     temperature_only=temperature_only,
                 )
+                if include_weather_features:
+                    rows = _preserve_existing_ok_nwp_rows_on_enrichment_failure(rows, existing_ok_keys)
                 existing = _append_cache(
                     cache_path,
                     existing,
@@ -634,6 +676,14 @@ def backfill_sdk_nwp(
                         exc,
                     )
                     row = _unavailable_nwp_row(request, str(exc))
+                if include_weather_features:
+                    rows = _preserve_existing_ok_nwp_rows_on_enrichment_failure([row], existing_ok_keys)
+                    if not rows:
+                        processed += 1
+                        if row_limit is not None and processed >= row_limit:
+                            break
+                        continue
+                    row = rows[0]
                 existing = _append_cache(
                     cache_path,
                     existing,
@@ -647,6 +697,31 @@ def backfill_sdk_nwp(
         if client is not None:
             client.close()
     return existing
+
+
+def _preserve_existing_ok_nwp_rows_on_enrichment_failure(
+    rows: list[dict[str, Any]],
+    existing_ok_keys: set[tuple[str, str, str, str, str]],
+) -> list[dict[str, Any]]:
+    preserved: list[dict[str, Any]] = []
+    for row in rows:
+        key = (
+            str(row.get("station_id", "")).upper(),
+            str(row.get("contract_date", ""))[:10],
+            str(row.get("provider", "")).lower(),
+            str(row.get("model", "")).lower(),
+            str(row.get("timing_mode", TIMING_MODE_STRICT_6AM)).lower(),
+        )
+        if str(row.get("fetch_status", "")).lower() != "ok" and key in existing_ok_keys:
+            logging.warning(
+                "Leaving existing OK NWP row unchanged after weather enrichment failed for %s %s %s",
+                row.get("provider"),
+                row.get("station_id"),
+                row.get("contract_date"),
+            )
+            continue
+        preserved.append(row)
+    return preserved
 
 
 def backfill_direct_nbm(
@@ -942,11 +1017,12 @@ def plan_nwp_requests(
                         contract_date,
                         timezone,
                     )
-                elif timing_mode == TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE:
-                    cycle, fxx_hours, as_of, window_start, window_end = choose_same_day_11am_live_safe_cycle(
+                elif timing_mode in LIVE_SAFE_TIMING_LOCAL_HOURS:
+                    cycle, fxx_hours, as_of, window_start, window_end = choose_same_day_live_safe_cycle(
                         model,
                         contract_date,
                         timezone,
+                        timing_mode,
                     )
                 else:
                     as_of = forecast_as_of_for_timing(contract_date, timezone, timing_mode)
@@ -996,8 +1072,13 @@ def choose_cycle(
     if timing_mode == TIMING_MODE_FRESH_AFTER_6AM:
         cycle, fxx_hours, _, _, _ = choose_fresh_after_6am_cycle(model, contract_date, timezone)
         return (cycle, fxx_hours) if cycle is not None and fxx_hours else (None, ())
-    if timing_mode == TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE:
-        cycle, fxx_hours, _, _, _ = choose_same_day_11am_live_safe_cycle(model, contract_date, timezone)
+    if timing_mode in LIVE_SAFE_TIMING_LOCAL_HOURS:
+        cycle, fxx_hours, _, _, _ = choose_same_day_live_safe_cycle(
+            model,
+            contract_date,
+            timezone,
+            timing_mode,
+        )
         return (cycle, fxx_hours) if cycle is not None and fxx_hours else (None, ())
     if timing_mode == TIMING_MODE_SAME_DAY_11AM:
         if forecast_window_start is None or forecast_window_end is None:
@@ -1372,10 +1453,11 @@ def _unavailable_actual_row(station: Any, contract_date: str, reason: str) -> di
 def _cycle_selection_policy(model: str, timing_mode: str) -> str:
     if timing_mode == TIMING_MODE_FRESH_AFTER_6AM:
         return f"first_{model}_cycle_issued_at_or_after_6am_local_remaining_day"
-    if timing_mode == TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE:
+    if timing_mode in LIVE_SAFE_TIMING_LOCAL_HOURS:
         lag = LIVE_SAFE_MODEL_LAG_MINUTES.get(model, MODEL_LAG_MINUTES.get(model, 120))
+        hour = LIVE_SAFE_TIMING_LOCAL_HOURS[timing_mode]
         return (
-            f"latest_{model}_cycle_available_by_1115_local_with_{lag}min_lag_"
+            f"latest_{model}_cycle_available_by_{hour:02d}15_local_with_{lag}min_lag_"
             "remaining_day"
         )
     if timing_mode == TIMING_MODE_SAME_DAY_11AM:
@@ -1501,7 +1583,9 @@ def _use_nwp_subprocess_fetch(request: NwpRequest) -> bool:
     value = os.getenv("WEATHER_RESEARCH_NWP_SUBPROCESS")
     if value is not None:
         return value.strip().lower() not in {"0", "false", "no", "off"}
-    return request.model in {"hrrr", "gfs", "nbm"}
+    # Mostly Right >=1.10 uses direct byte-range NWP fetching internally.
+    # Keep subprocess isolation available as an explicit escape hatch only.
+    return False
 
 
 def _use_nbm_subprocess_fetch(request: NwpRequest) -> bool:
@@ -1546,6 +1630,7 @@ def _fetch_nwp_batch_hourly_subprocess(
                     frame = pd.read_csv(output_path)
                     return _filter_nwp_hourly_frame(frame, first) if not frame.empty else pd.DataFrame()
                 last_error = (result.stderr or result.stdout or "").strip()
+                retryable = _is_transient_nwp_error_text(last_error)
                 logging.warning(
                     "Mostly Right %s subprocess failed for %s %s cycle=%s fxx=%s attempt %s/%s: %s",
                     first.model.upper(),
@@ -1557,12 +1642,31 @@ def _fetch_nwp_batch_hourly_subprocess(
                     max_attempts,
                     last_error[-500:],
                 )
+                if not retryable:
+                    break
         raise RuntimeError(f"{first.model.upper()} subprocess failed after {max_attempts} attempts: {last_error[-500:]}")
 
     fxx_hours = list(first.fxx_hours)
     worker_count = min(max(1, int(fxx_workers)), len(fxx_hours) or 1)
     if worker_count <= 1 or len(fxx_hours) <= 1:
-        return run_payload(fxx_hours)
+        frames = []
+        for fxx in fxx_hours:
+            try:
+                frame = run_payload([fxx])
+            except Exception as exc:  # noqa: BLE001
+                logging.warning(
+                    "Mostly Right %s f%03d unavailable for %s %s cycle=%s: %s",
+                    first.model.upper(),
+                    fxx,
+                    first.contract_date,
+                    first.timing_mode,
+                    first.cycle.isoformat(),
+                    exc,
+                )
+                continue
+            if frame is not None and not frame.empty:
+                frames.append(frame)
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
     frames: list[pd.DataFrame] = []
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -1720,7 +1824,24 @@ def _nwp_fxx_retry_sleep_seconds() -> float:
 
 
 def _is_transient_nwp_fxx_error(exc: Exception) -> bool:
-    text = f"{type(exc).__name__}: {exc}".lower()
+    return _is_transient_nwp_error_text(f"{type(exc).__name__}: {exc}")
+
+
+def _is_transient_nwp_error_text(text: str) -> bool:
+    text = text.lower()
+    deterministic_markers = (
+        "eccodes error",
+        "fatal flex scanner",
+        "parser: syntax error",
+        "ecCodes assertion failed".lower(),
+        "cannot create accessor",
+        "no final 7777",
+        "invalid size",
+        "unknown unit",
+        "key/value not found",
+    )
+    if any(marker in text for marker in deterministic_markers):
+        return False
     transient_markers = (
         "server disconnected",
         "connection reset",
@@ -1905,6 +2026,19 @@ def _load_existing(path: Path) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+def _write_csv_atomic(frame: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        frame.to_csv(tmp_path, index=False)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
 def _append_cache(path: Path, existing: pd.DataFrame, rows: list[dict[str, Any]], keys: list[str]) -> pd.DataFrame:
     fresh = pd.DataFrame(rows)
     combined = pd.concat([existing, fresh], ignore_index=True) if not existing.empty else fresh
@@ -1917,7 +2051,7 @@ def _append_cache(path: Path, existing: pd.DataFrame, rows: list[dict[str, Any]]
     combined = combined.drop_duplicates(subset=keys, keep="last")
     sort_cols = [col for col in ["contract_date", "provider", "model", "station_id"] if col in combined]
     combined = combined.sort_values(sort_cols).reset_index(drop=True) if sort_cols else combined.reset_index(drop=True)
-    combined.to_csv(path, index=False)
+    _write_csv_atomic(combined, path)
     return combined
 
 
@@ -1950,7 +2084,7 @@ def _completed_nwp_keys(
         raw_high_ok = pd.to_numeric(work["raw_forecast_high_f"], errors="coerce").notna()
         feature_done = work[WEATHER_FEATURE_FLAG].map(_truthy)
         precip_done = work[PRECIP_FEATURE_FLAG].map(_truthy)
-        good = work.loc[(status == "unavailable") | ((status == "ok") & raw_high_ok & feature_done & precip_done)].copy()
+        good = work.loc[(status == "ok") & raw_high_ok & feature_done & precip_done].copy()
     else:
         good = _ok_rows(frame).dropna(subset=["raw_forecast_high_f"])
     if "timing_mode" not in good.columns:

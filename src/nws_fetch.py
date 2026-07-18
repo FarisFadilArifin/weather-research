@@ -636,6 +636,7 @@ def _download_nbm_subset(
     variable = variable.upper()
     level_label = "" if level is None else "_" + "".join(ch.lower() if ch.isalnum() else "_" for ch in level).strip("_")
     local = raw_dir / f"nbm_{variable.lower()}{level_label}_{issue_time:%Y%m%d%H}_f{fxx:03d}_{suffix}.grib2"
+    local.parent.mkdir(parents=True, exist_ok=True)
     if local.exists() and local.stat().st_size > 0 and not force_refresh:
         return local
     if local.exists() and local.stat().st_size == 0:
@@ -652,12 +653,20 @@ def _download_nbm_subset(
             )
             idx_response.raise_for_status()
             ranges = _nbm_byte_ranges(idx_response.text, variable=variable, level=level)
-            with local.open("wb") as handle:
-                for start, end in ranges:
-                    headers = {"Range": f"bytes={start}-{end}", "User-Agent": "weather-research/0.1"}
-                    response = _nbm_get_with_retries(url, settings or {}, timeout=90, headers=headers)
-                    response.raise_for_status()
-                    handle.write(response.content)
+            tmp = local.with_name(f".{local.name}.{os.getpid()}.tmp")
+            if tmp.exists():
+                tmp.unlink()
+            try:
+                with tmp.open("wb") as handle:
+                    for start, end in ranges:
+                        headers = {"Range": f"bytes={start}-{end}", "User-Agent": "weather-research/0.1"}
+                        response = _nbm_get_with_retries(url, settings or {}, timeout=90, headers=headers)
+                        response.raise_for_status()
+                        handle.write(response.content)
+                os.replace(tmp, local)
+            finally:
+                if tmp.exists():
+                    tmp.unlink()
             return local
         except TransientNbmDownloadError:
             if local.exists() and local.stat().st_size == 0:

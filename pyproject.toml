@@ -28,8 +28,8 @@ dependencies = [
     "lightgbm>=4.0",
     "catboost>=1.2",
     "optuna>=3.6",
-    "mostlyrightmd[research]>=1.0,<2.0",
-    "mostlyrightmd-weather[nwp]>=1.0,<2.0",
+    "mostlyrightmd[research]>=1.10.1,<2.0",
+    "mostlyrightmd-weather[nwp]>=1.10.1,<2.0",
 ]
 
 [project.optional-dependencies]

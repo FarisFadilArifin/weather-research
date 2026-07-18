@@ -6,7 +6,9 @@ param(
     [int]$FxxWorkers = 1,
     [string[]]$Models = @("hrrr", "gfs"),
     [string[]]$Stations = @("KATL", "KAUS", "KORD", "KDAL", "KHOU", "KLAX", "KMIA", "KLGA", "KSEA"),
-    [string]$TimingMode = "same_day_11am_live_safe"
+    [string]$TimingMode = "same_day_11am_live_safe",
+    [switch]$IncludeWeatherFeatures,
+    [string]$LogLabel = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,7 +16,11 @@ $ErrorActionPreference = "Stop"
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = Resolve-Path (Join-Path $ScriptRoot "..")
 $Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
-$LogRoot = Join-Path $ProjectRoot "logs\live_safe_shards"
+$LogRootName = if ($IncludeWeatherFeatures) { "live_safe_shards_weather" } else { "live_safe_shards" }
+if ($LogLabel) {
+    $LogRootName = "${LogRootName}_$LogLabel"
+}
+$LogRoot = Join-Path $ProjectRoot "logs\$LogRootName"
 $DataRoot = Join-Path $ProjectRoot "data\calibration"
 $ManifestPath = Join-Path $LogRoot "manifest.csv"
 $StatusPath = Join-Path $LogRoot "status.csv"
@@ -96,7 +102,11 @@ function Get-ShardCacheStats {
         ok_rows = $okRows
         non_ok_rows = $rows.Count - $okRows
         expected_rows = $expectedRows
-        complete = ($rows.Count -ge $expectedRows)
+        weather_ok_rows = @($rows | Where-Object { $_.fetch_status -eq "ok" -and $_.weather_features_included -eq "True" }).Count
+        complete = (
+            ($rows.Count -ge $expectedRows) -and
+            (-not $IncludeWeatherFeatures -or $okRows -eq 0 -or @($rows | Where-Object { $_.fetch_status -eq "ok" -and $_.weather_features_included -ne "True" }).Count -eq 0)
+        )
     }
 }
 
@@ -145,7 +155,7 @@ $shards |
     Select-Object shard_id, model, start_date, end_date, cache_dir, stdout_log, stderr_log |
     Export-Csv -Path $ManifestPath -NoTypeInformation
 
-Write-EventLine "created manifest with $($shards.Count) shards; max_parallel=$MaxParallel shard_months=$ShardMonths fxx_workers=$FxxWorkers"
+Write-EventLine "created manifest with $($shards.Count) shards; max_parallel=$MaxParallel shard_months=$ShardMonths fxx_workers=$FxxWorkers include_weather_features=$IncludeWeatherFeatures"
 Save-Status -Shards $shards
 
 while (($shards | Where-Object { $_.state -in @("pending", "running") }).Count -gt 0) {
@@ -208,10 +218,15 @@ while (($shards | Where-Object { $_.state -in @("pending", "running") }).Count -
                 "--timing-mode", $TimingMode,
                 "--start-date", $shard.start_date,
                 "--end-date", $shard.end_date,
-                "--temperature-only",
                 "--fxx-workers", "$FxxWorkers",
                 "--log-level", "INFO"
             )
+            if ($IncludeWeatherFeatures) {
+                $args += "--include-weather-features"
+            }
+            else {
+                $args += "--temperature-only"
+            }
             $proc = Start-Process -FilePath $Python `
                 -ArgumentList $args `
                 -WorkingDirectory $ProjectRoot `

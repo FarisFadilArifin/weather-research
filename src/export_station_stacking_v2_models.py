@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.metadata
 import json
+import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -62,9 +65,13 @@ def export_station_model_weights(
     feature_version: str = DEFAULT_FEATURE_VERSION,
     optuna_metric: str = DEFAULT_OPTUNA_METRIC,
     target_mode: str = DEFAULT_TARGET_MODE,
+    target_source: str = "iem_hourly",
     base_model_methods: tuple[str, ...] = DEFAULT_BASE_MODEL_METHODS,
     stack_enabled: bool = True,
     source_pipeline: str = DEFAULT_SOURCE_PIPELINE,
+    feature_pipeline: str | None = None,
+    selected_guarded_cap_f: float | None = None,
+    baseline_comparison: dict[str, Any] | None = None,
 ) -> ExportedModelWeights:
     root = Path(project_root).resolve()
     station = station_id.upper()
@@ -91,6 +98,7 @@ def export_station_model_weights(
         feature_version=feature_version,
         optuna_metric=optuna_metric,
         target_mode=target_mode,
+        target_source=target_source,
         base_model_methods=methods,
         stack_enabled=stack_enabled,
     )
@@ -139,6 +147,7 @@ def export_station_model_weights(
                 "param_key": str(row.get("param_key", "")),
                 "mean_validation_rmse_f": _jsonable(row.get("mean_validation_rmse_f")),
                 "mean_validation_mae_f": _jsonable(row.get("mean_validation_mae_f")),
+                "mean_validation_bucket_log_loss": _jsonable(row.get("mean_validation_bucket_log_loss")),
                 "params": _jsonable(params),
             }
         )
@@ -149,11 +158,18 @@ def export_station_model_weights(
             stack_tuning,
             metric_col=config.effective_optuna_metric,
             base_model_methods=methods,
+            providers=config.providers,
         )
         final_model_method = STACK_METHOD
     else:
         stack_model, stack_manifest = None, _disabled_stack_manifest()
         final_model_method = methods[0]
+    residual_calibrator = (
+        _ridge_residual_calibrator(validation_predictions, stack_model, stack_manifest["features"], methods)
+        if stack_enabled
+        else _empty_residual_calibrator()
+    )
+    bucket_probability_policy = _bucket_probability_policy(residual_calibrator)
 
     bundle = {
         "schema_version": 1,
@@ -161,6 +177,7 @@ def export_station_model_weights(
         "station_id": station,
         "target": TARGET,
         "target_mode": config.effective_target_mode,
+        "target_source": config.effective_target_source,
         "model_target": _model_target_column(config),
         "observed_high_so_far_column": OBSERVED_HIGH_SO_FAR_COLUMN,
         "training_mode": training_mode,
@@ -177,11 +194,17 @@ def export_station_model_weights(
         "timing_mode": config.timing_mode,
         "feature_version": config.effective_feature_version,
         "optuna_metric": config.effective_optuna_metric,
+        "bucket_probability_policy": bucket_probability_policy,
+        "residual_calibrator": residual_calibrator,
     }
 
     bundle_path = output_dir / f"{station}_{model_version}.joblib"
     manifest_path = output_dir / f"{station}_{model_version}.json"
     _dump_joblib(bundle, bundle_path)
+    bundle_sha256 = _sha256_file(bundle_path)
+    resolved_feature_pipeline = feature_pipeline or _feature_pipeline_name(
+        config.effective_feature_version
+    )
 
     manifest = {
         "schema_version": 1,
@@ -192,12 +215,23 @@ def export_station_model_weights(
         "source_pipeline": source_pipeline,
         "source_artifact_dir": str(artifacts),
         "bundle_path": str(bundle_path),
+        "artifact_integrity": {
+            "bundle_sha256": bundle_sha256,
+        },
+        "source_identity": _git_identity(root),
+        "package_runtime_compatibility": {
+            "runtime_contract": "requirements-ml-runtime.txt",
+            "python": ">=3.11",
+            "feature_pipeline": resolved_feature_pipeline,
+            "package_versions": _runtime_package_versions(),
+        },
         "model_contract": {
             "timing_mode": config.timing_mode,
             "providers": list(config.providers),
             "feature_version": config.effective_feature_version,
             "optuna_metric": config.effective_optuna_metric,
             "target_mode": config.effective_target_mode,
+            "target_source": config.effective_target_source,
             "model_target": _model_target_column(config),
             "base_model_methods": list(methods),
             "stack_enabled": bool(stack_enabled),
@@ -212,6 +246,7 @@ def export_station_model_weights(
             "last_contract_date": str(train["contract_date"].max()),
             "target": TARGET,
             "model_target": _model_target_column(config),
+            "target_source": config.effective_target_source,
         },
         "features": {
             "categorical": fit_categorical,
@@ -220,8 +255,11 @@ def export_station_model_weights(
         },
         "base_models": base_model_manifests,
         "stack_model": stack_manifest,
+        "bucket_probability_policy": bucket_probability_policy,
+        "residual_calibrator": residual_calibrator,
         "inference": {
             "primary_output": "predictedHighF",
+            "secondary_output": "bucketProbabilities",
             "final_model_method": final_model_method,
             "base_prediction_inputs": [f"{method}_predicted_high_f" for method in methods],
             "base_model_raw_output": _model_target_column(config),
@@ -235,6 +273,11 @@ def export_station_model_weights(
                 if feature.endswith("_raw_predicted_high_f")
             ],
             "point_in_time_rule": _point_in_time_rule(config),
+        },
+        "v12_guarded_blend": {
+            "selected_cap_f": selected_guarded_cap_f,
+            "baseline_comparison": baseline_comparison or {},
+            "candidate_only_until_handoff_acceptance": True,
         },
     }
     manifest_path.write_text(json.dumps(_jsonable(manifest), indent=2) + "\n", encoding="utf-8")
@@ -253,9 +296,13 @@ def export_all_station_model_weights(
     feature_version: str = DEFAULT_FEATURE_VERSION,
     optuna_metric: str = DEFAULT_OPTUNA_METRIC,
     target_mode: str = DEFAULT_TARGET_MODE,
+    target_source: str = "iem_hourly",
     base_model_methods: tuple[str, ...] = DEFAULT_BASE_MODEL_METHODS,
     stack_enabled: bool = True,
     source_pipeline: str = DEFAULT_SOURCE_PIPELINE,
+    feature_pipeline: str | None = None,
+    selected_guarded_cap_f: float | None = None,
+    baseline_comparison: dict[str, Any] | None = None,
 ) -> list[ExportedModelWeights]:
     exports = [
         export_station_model_weights(
@@ -270,9 +317,13 @@ def export_all_station_model_weights(
             feature_version=feature_version,
             optuna_metric=optuna_metric,
             target_mode=target_mode,
+            target_source=target_source,
             base_model_methods=base_model_methods,
             stack_enabled=stack_enabled,
             source_pipeline=source_pipeline,
+            feature_pipeline=feature_pipeline,
+            selected_guarded_cap_f=selected_guarded_cap_f,
+            baseline_comparison=baseline_comparison,
         )
         for station in stations
     ]
@@ -285,17 +336,24 @@ def _fit_stack_model(
     stack_tuning: pd.DataFrame,
     metric_col: str = DEFAULT_OPTUNA_METRIC,
     base_model_methods: tuple[str, ...] = DEFAULT_BASE_MODEL_METHODS,
+    providers: tuple[str, ...] = DEFAULT_PROVIDERS,
 ) -> tuple[Any, dict[str, Any]]:
-    if metric_col not in {"mae_f", "rmse_f"}:
-        raise ValueError("metric_col must be 'mae_f' or 'rmse_f'")
+    if metric_col not in {"mae_f", "rmse_f", "bucket_log_loss"}:
+        raise ValueError("metric_col must be 'mae_f', 'rmse_f', or 'bucket_log_loss'")
     ok = stack_tuning.loc[stack_tuning["status"].astype(str).str.lower().eq("ok")].copy()
     if ok.empty:
         raise ValueError("No successful ridge stack tuning rows are available.")
     selected = ok.sort_values([metric_col, "param_key"]).iloc[0]
-    stack_methods = [*base_model_methods, "hrrr_raw", "gfs_raw"]
-    train_source = _year_split_stack_source_frame(validation_predictions, stack_methods)
     feature_set = str(selected["feature_set"])
-    stack_features = _stack_features_for_set(feature_set, base_model_methods)
+    available_methods = set(validation_predictions.get("method", pd.Series(dtype=str)).astype(str))
+    ordered_providers = tuple(
+        provider
+        for provider in dict.fromkeys(("hrrr", "gfs", *providers))
+        if f"{provider}_raw" in available_methods
+    )
+    stack_features = _stack_features_for_set(feature_set, base_model_methods, ordered_providers)
+    stack_methods = [feature.removesuffix("_predicted_high_f") for feature in stack_features]
+    train_source = _year_split_stack_source_frame(validation_predictions, stack_methods)
     train = train_source.dropna(subset=[*stack_features, TARGET]).copy()
     if train.empty:
         raise ValueError("No complete rows are available for fitting the ridge stack.")
@@ -313,6 +371,7 @@ def _fit_stack_model(
         "fit_intercept": _coerce_bool(selected["fit_intercept"]),
         "validation_rmse_f": _jsonable(selected.get("rmse_f")),
         "validation_mae_f": _jsonable(selected.get("mae_f")),
+        "validation_bucket_log_loss": _jsonable(selected.get("bucket_log_loss")),
         "selection_metric": metric_col,
         "meta_train_rows": int(len(train)),
         "meta_train_first_contract_date": str(train["contract_date"].min()),
@@ -332,6 +391,64 @@ def _disabled_stack_manifest() -> dict[str, Any]:
     }
 
 
+def _ridge_residual_calibrator(
+    validation_predictions: pd.DataFrame,
+    stack_model: Any,
+    stack_features: list[str],
+    base_model_methods: tuple[str, ...],
+) -> dict[str, Any]:
+    if validation_predictions.empty or stack_model is None or not stack_features:
+        return _empty_residual_calibrator()
+    stack_methods = [*base_model_methods, "hrrr_raw", "gfs_raw"]
+    source = _year_split_stack_source_frame(validation_predictions, stack_methods)
+    if source.empty or any(column not in source for column in stack_features):
+        return _empty_residual_calibrator()
+    source = source.dropna(subset=[*stack_features, TARGET]).copy()
+    if source.empty:
+        return _empty_residual_calibrator()
+    predicted = pd.to_numeric(pd.Series(stack_model.predict(source[stack_features]), index=source.index), errors="coerce")
+    actual = pd.to_numeric(source[TARGET], errors="coerce")
+    residual = (actual - predicted).dropna()
+    if residual.empty:
+        return _empty_residual_calibrator()
+    error_std = float(residual.std(ddof=0)) if len(residual) >= 2 else float("nan")
+    if not np.isfinite(error_std) or error_std <= 0:
+        mae = float(residual.abs().mean()) if residual.notna().any() else 1.0
+        error_std = max(0.75, mae if np.isfinite(mae) and mae > 0 else 1.0)
+    return {
+        "method": STACK_METHOD,
+        "source": "validation_predictions",
+        "error_mean_f": float(residual.mean()),
+        "error_std_f": max(0.25, error_std),
+        "row_count": int(len(residual)),
+        "first_contract_date": str(source.loc[residual.index, "contract_date"].min()),
+        "last_contract_date": str(source.loc[residual.index, "contract_date"].max()),
+    }
+
+
+def _empty_residual_calibrator() -> dict[str, Any]:
+    return {
+        "method": STACK_METHOD,
+        "source": "unavailable",
+        "error_mean_f": 0.0,
+        "error_std_f": 2.0,
+        "row_count": 0,
+        "first_contract_date": None,
+        "last_contract_date": None,
+    }
+
+
+def _bucket_probability_policy(residual_calibrator: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "method": "normal_residual_interval_probability",
+        "bucket_rounding": "polymarket_half_up_2f",
+        "continuity_correction_f": 0.5,
+        "residual_calibrator_method": residual_calibrator.get("method", STACK_METHOD),
+        "live_output": "bucketProbabilities",
+    }
+
+
 def _read_required_csv(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Missing required station-stacking artifact: {path}")
@@ -348,6 +465,59 @@ def _read_optional_csv(path: Path) -> pd.DataFrame:
         return pd.read_csv(path, low_memory=False)
     except pd.errors.EmptyDataError:
         return pd.DataFrame()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _feature_pipeline_name(feature_version: str) -> str:
+    if feature_version == "v20_peak_timing":
+        return "station_stacking_v20_peak_timing"
+    if feature_version == "v11_settlement_fix_temp":
+        return "station_stacking_v11_settlement_fix"
+    if feature_version.startswith("v11"):
+        return "station_stacking_v11"
+    return f"station_stacking_{feature_version}"
+
+
+def _runtime_package_versions() -> dict[str, str | None]:
+    packages = {
+        "catboost": "catboost",
+        "joblib": "joblib",
+        "lightgbm": "lightgbm",
+        "numpy": "numpy",
+        "pandas": "pandas",
+        "scikit-learn": "scikit-learn",
+        "xgboost": "xgboost",
+    }
+    out: dict[str, str | None] = {}
+    for label, distribution in packages.items():
+        try:
+            out[label] = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            out[label] = None
+    return out
+
+
+def _git_identity(root: Path) -> dict[str, Any]:
+    try:
+        commit = subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+        ).strip()
+        dirty = bool(
+            subprocess.check_output(
+                ["git", "-C", str(root), "status", "--porcelain"], text=True
+            ).strip()
+        )
+    except (OSError, subprocess.CalledProcessError):
+        commit = None
+        dirty = None
+    return {"git_commit": commit, "git_dirty": dirty}
 
 
 def _validated_base_model_methods(methods: tuple[str, ...]) -> tuple[str, ...]:
@@ -472,6 +642,7 @@ def main() -> None:
     parser.add_argument("--feature-version", default=DEFAULT_FEATURE_VERSION, help="Feature version recorded in the bundle.")
     parser.add_argument("--optuna-metric", default=DEFAULT_OPTUNA_METRIC, help="Metric used to select stack tuning rows.")
     parser.add_argument("--target-mode", default=DEFAULT_TARGET_MODE, help="Base-model target mode recorded in the bundle.")
+    parser.add_argument("--target-source", default="iem_hourly", help="Target source recorded in the bundle.")
     parser.add_argument(
         "--base-model-methods",
         nargs="+",
@@ -498,6 +669,7 @@ def main() -> None:
         feature_version=args.feature_version,
         optuna_metric=args.optuna_metric,
         target_mode=args.target_mode,
+        target_source=args.target_source,
         base_model_methods=tuple(args.base_model_methods),
         stack_enabled=not args.disable_stack,
         source_pipeline=args.source_pipeline,
