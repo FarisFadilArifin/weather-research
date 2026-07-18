@@ -22,6 +22,7 @@ from src.calibration.station_stacking import (
     TARGET,
     TARGET_MODE_DIRECT_HIGH,
     TARGET_STATIONS,
+    TRAINING_PROFILE_LEGACY,
     StationStackingConfig,
     _build_base_model_pipeline,
     _fit_feature_columns,
@@ -29,7 +30,9 @@ from src.calibration.station_stacking import (
     _model_target_values,
     _modeling_frame,
     _params_from_selected_row,
+    _select_stack_tuning_candidate,
     _stack_features_for_set,
+    _year_split_fold_weight,
     _year_split_stack_source_frame,
 )
 
@@ -40,6 +43,7 @@ DEFAULT_MODEL_DIR_NAME = "model_weights"
 DEFAULT_TIMING_MODE = "same_day_11am"
 DEFAULT_PROVIDERS = ("gfs", "hrrr")
 DEFAULT_FEATURE_VERSION = "base"
+DEFAULT_TRAINING_PROFILE = TRAINING_PROFILE_LEGACY
 DEFAULT_OPTUNA_METRIC = "rmse_f"
 DEFAULT_TARGET_MODE = TARGET_MODE_DIRECT_HIGH
 DEFAULT_BASE_MODEL_METHODS = tuple(BASE_MODEL_METHODS)
@@ -63,6 +67,7 @@ def export_station_model_weights(
     timing_mode: str = DEFAULT_TIMING_MODE,
     providers: tuple[str, ...] = DEFAULT_PROVIDERS,
     feature_version: str = DEFAULT_FEATURE_VERSION,
+    training_profile: str = DEFAULT_TRAINING_PROFILE,
     optuna_metric: str = DEFAULT_OPTUNA_METRIC,
     target_mode: str = DEFAULT_TARGET_MODE,
     target_source: str = "iem_hourly",
@@ -96,6 +101,7 @@ def export_station_model_weights(
         providers=providers,
         output_dir=artifacts,
         feature_version=feature_version,
+        training_profile=training_profile,
         optuna_metric=optuna_metric,
         target_mode=target_mode,
         target_source=target_source,
@@ -159,6 +165,7 @@ def export_station_model_weights(
             metric_col=config.effective_optuna_metric,
             base_model_methods=methods,
             providers=config.providers,
+            training_profile=config.effective_training_profile,
         )
         final_model_method = STACK_METHOD
     else:
@@ -193,6 +200,7 @@ def export_station_model_weights(
         "providers": tuple(config.providers),
         "timing_mode": config.timing_mode,
         "feature_version": config.effective_feature_version,
+        "training_profile": config.effective_training_profile,
         "optuna_metric": config.effective_optuna_metric,
         "bucket_probability_policy": bucket_probability_policy,
         "residual_calibrator": residual_calibrator,
@@ -229,6 +237,7 @@ def export_station_model_weights(
             "timing_mode": config.timing_mode,
             "providers": list(config.providers),
             "feature_version": config.effective_feature_version,
+            "training_profile": config.effective_training_profile,
             "optuna_metric": config.effective_optuna_metric,
             "target_mode": config.effective_target_mode,
             "target_source": config.effective_target_source,
@@ -247,6 +256,35 @@ def export_station_model_weights(
             "target": TARGET,
             "model_target": _model_target_column(config),
             "target_source": config.effective_target_source,
+        },
+        "training_validation": {
+            "training_profile": config.effective_training_profile,
+            "base_fold_policy": (
+                "four_equal_weight_expanding_folds_2022_2025"
+                if config.effective_training_profile != TRAINING_PROFILE_LEGACY
+                else "configured_legacy_folds"
+            ),
+            "base_folds": [
+                {
+                    "name": fold.name,
+                    "train_start_year": fold.train_start_year,
+                    "train_end_year": fold.train_end_year,
+                    "validation_year": fold.validation_year,
+                    "weight": _year_split_fold_weight(fold, config),
+                }
+                for fold in config.effective_year_split_folds
+            ],
+            "stack_validation_mode": (
+                "three_expanding_meta_folds_2023_2025"
+                if config.effective_training_profile != TRAINING_PROFILE_LEGACY
+                else "single_latest_meta_year"
+            ),
+            "selected_ridge_trial": stack_manifest.get("param_key"),
+            "selected_ridge_trial_number": stack_manifest.get("trial_number"),
+            "stack_mean_selection_metric": stack_manifest.get("validation_mean_selection_metric"),
+            "stack_worst_selection_metric": stack_manifest.get("validation_worst_selection_metric"),
+            "stack_fold_count": stack_manifest.get("validation_fold_count", 0),
+            "stack_selection_rule": stack_manifest.get("selection_rule"),
         },
         "features": {
             "categorical": fit_categorical,
@@ -294,6 +332,7 @@ def export_all_station_model_weights(
     timing_mode: str = DEFAULT_TIMING_MODE,
     providers: tuple[str, ...] = DEFAULT_PROVIDERS,
     feature_version: str = DEFAULT_FEATURE_VERSION,
+    training_profile: str = DEFAULT_TRAINING_PROFILE,
     optuna_metric: str = DEFAULT_OPTUNA_METRIC,
     target_mode: str = DEFAULT_TARGET_MODE,
     target_source: str = "iem_hourly",
@@ -315,6 +354,7 @@ def export_all_station_model_weights(
             timing_mode=timing_mode,
             providers=providers,
             feature_version=feature_version,
+            training_profile=training_profile,
             optuna_metric=optuna_metric,
             target_mode=target_mode,
             target_source=target_source,
@@ -337,21 +377,14 @@ def _fit_stack_model(
     metric_col: str = DEFAULT_OPTUNA_METRIC,
     base_model_methods: tuple[str, ...] = DEFAULT_BASE_MODEL_METHODS,
     providers: tuple[str, ...] = DEFAULT_PROVIDERS,
+    training_profile: str = DEFAULT_TRAINING_PROFILE,
 ) -> tuple[Any, dict[str, Any]]:
-    if metric_col not in {"mae_f", "rmse_f", "bucket_log_loss"}:
-        raise ValueError("metric_col must be 'mae_f', 'rmse_f', or 'bucket_log_loss'")
-    ok = stack_tuning.loc[stack_tuning["status"].astype(str).str.lower().eq("ok")].copy()
-    if ok.empty:
-        raise ValueError("No successful ridge stack tuning rows are available.")
-    aggregate = ok.groupby("param_key", as_index=False).agg(
-        mean_metric=(metric_col, "mean"),
-        worst_metric=(metric_col, "max"),
+    profile_config = StationStackingConfig(station_id="EXPORT", training_profile=training_profile)
+    selected, selected_rows, selection_summary = _select_stack_tuning_candidate(
+        stack_tuning,
+        metric_col,
+        aggregate_folds=profile_config.effective_training_profile != TRAINING_PROFILE_LEGACY,
     )
-    selected_key = aggregate.sort_values(
-        ["mean_metric", "worst_metric", "param_key"]
-    ).iloc[0]["param_key"]
-    selected_rows = ok.loc[ok["param_key"].eq(selected_key)].copy()
-    selected = selected_rows.iloc[0]
     feature_set = str(selected["feature_set"])
     available_methods = set(validation_predictions.get("method", pd.Series(dtype=str)).astype(str))
     ordered_providers = tuple(
@@ -373,22 +406,31 @@ def _fit_stack_model(
     manifest = {
         "method": STACK_METHOD,
         "param_key": str(selected["param_key"]),
+        "trial_number": _jsonable(selected.get("trial_number")),
         "feature_set": feature_set,
         "features": stack_features,
         "alpha": float(selected["alpha"]),
         "fit_intercept": _coerce_bool(selected["fit_intercept"]),
-        "validation_rmse_f": _jsonable(selected_rows["rmse_f"].mean()),
-        "validation_mae_f": _jsonable(selected_rows["mae_f"].mean()),
-        "validation_bucket_log_loss": _jsonable(
-            selected_rows["bucket_log_loss"].mean()
-        ),
-        "validation_fold_count": int(selected_rows["fold"].nunique()),
+        "validation_rmse_f": _selected_metric_mean(selected_rows, "rmse_f"),
+        "validation_mae_f": _selected_metric_mean(selected_rows, "mae_f"),
+        "validation_bucket_log_loss": _selected_metric_mean(selected_rows, "bucket_log_loss"),
+        "validation_fold_count": selection_summary["fold_count"],
+        "validation_mean_selection_metric": selection_summary["mean_metric"],
+        "validation_worst_selection_metric": selection_summary["worst_metric"],
+        "selection_rule": selection_summary["selection_rule"],
         "selection_metric": metric_col,
         "meta_train_rows": int(len(train)),
         "meta_train_first_contract_date": str(train["contract_date"].min()),
         "meta_train_last_contract_date": str(train["contract_date"].max()),
     }
     return model, manifest
+
+
+def _selected_metric_mean(selected_rows: pd.DataFrame, metric_col: str) -> Any:
+    if metric_col not in selected_rows:
+        return None
+    values = pd.to_numeric(selected_rows[metric_col], errors="coerce")
+    return _jsonable(values.mean())
 
 
 def _disabled_stack_manifest() -> dict[str, Any]:
@@ -651,6 +693,7 @@ def main() -> None:
         help="Forecast providers required by this bundle.",
     )
     parser.add_argument("--feature-version", default=DEFAULT_FEATURE_VERSION, help="Feature version recorded in the bundle.")
+    parser.add_argument("--training-profile", default=DEFAULT_TRAINING_PROFILE, help="Training/validation profile recorded in the bundle.")
     parser.add_argument("--optuna-metric", default=DEFAULT_OPTUNA_METRIC, help="Metric used to select stack tuning rows.")
     parser.add_argument("--target-mode", default=DEFAULT_TARGET_MODE, help="Base-model target mode recorded in the bundle.")
     parser.add_argument("--target-source", default="iem_hourly", help="Target source recorded in the bundle.")
@@ -678,6 +721,7 @@ def main() -> None:
         timing_mode=args.timing_mode,
         providers=tuple(provider.lower() for provider in args.providers),
         feature_version=args.feature_version,
+        training_profile=args.training_profile,
         optuna_metric=args.optuna_metric,
         target_mode=args.target_mode,
         target_source=args.target_source,

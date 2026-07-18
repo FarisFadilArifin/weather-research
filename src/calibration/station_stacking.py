@@ -30,6 +30,8 @@ OBSERVED_HIGH_SO_FAR_COLUMN = "observed_high_temp_through_as_of_f"
 REMAINING_WARMUP_TARGET = "remaining_warmup_from_observed_high_so_far_f"
 TARGET_MODE_DIRECT_HIGH = "actual_high"
 TARGET_MODE_REMAINING_WARMUP = "remaining_warmup"
+TRAINING_PROFILE_LEGACY = "legacy"
+TRAINING_PROFILE_V20_ALIGNED = "v20_aligned"
 TIMING_MODE_SAME_DAY_11AM = "same_day_11am"
 TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE = "same_day_11am_live_safe"
 TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE = "same_day_9am_live_safe"
@@ -733,6 +735,7 @@ class StationStackingConfig:
     target_mode: str = TARGET_MODE_DIRECT_HIGH
     target_source: str = TARGET_SOURCE_IEM_HOURLY
     feature_version: str = "base"
+    training_profile: str = TRAINING_PROFILE_LEGACY
     hyperparameter_space: str = "default"
     catboost_max_iterations: int | None = None
     catboost_max_depth: int | None = None
@@ -812,6 +815,21 @@ class StationStackingConfig:
                 + ", ".join(f"'{item}'" for item in SUPPORTED_FEATURE_VERSIONS)
             )
         return version
+
+    @property
+    def effective_training_profile(self) -> str:
+        value = str(self.training_profile or TRAINING_PROFILE_LEGACY).strip().lower().replace("-", "_")
+        aliases = {
+            "": TRAINING_PROFILE_LEGACY,
+            "default": TRAINING_PROFILE_LEGACY,
+            "legacy": TRAINING_PROFILE_LEGACY,
+            "v20": TRAINING_PROFILE_V20_ALIGNED,
+            "v20_aligned": TRAINING_PROFILE_V20_ALIGNED,
+        }
+        profile = aliases.get(value, value)
+        if profile not in {TRAINING_PROFILE_LEGACY, TRAINING_PROFILE_V20_ALIGNED}:
+            raise ValueError("training_profile must be one of: 'legacy' or 'v20_aligned'")
+        return profile
 
     @property
     def effective_target_source(self) -> str:
@@ -897,7 +915,15 @@ class StationStackingConfig:
 
     @property
     def effective_year_split_folds(self) -> tuple["YearSplitFold", ...]:
+        if self.effective_training_profile == TRAINING_PROFILE_V20_ALIGNED:
+            return V20_EXPANDING_FOLDS
         return tuple(self.year_split_folds) if self.year_split_folds is not None else YEAR_SPLIT_FOLDS
+
+    @property
+    def effective_year_split_validation_weights(self) -> dict[int, float] | None:
+        if self.effective_training_profile == TRAINING_PROFILE_V20_ALIGNED:
+            return {fold.validation_year: 1.0 for fold in V20_EXPANDING_FOLDS}
+        return self.year_split_validation_weights
 
     @property
     def effective_year_split_test_train_years(self) -> tuple[int, int]:
@@ -990,6 +1016,7 @@ V20_EXPANDING_FOLDS = (
     YearSplitFold("fold_2021_2023_to_2024", 2021, 2023, 2024),
     YearSplitFold("fold_2021_2024_to_2025", 2021, 2024, 2025),
 )
+V20_STACK_META_VALIDATION_YEARS = (2023, 2024, 2025)
 YEAR_SPLIT_TEST_TRAIN_YEARS = (2021, 2025)
 YEAR_SPLIT_TEST_YEAR = 2026
 
@@ -1993,15 +2020,11 @@ def tune_year_split_stack_model(
     ok = tuning.loc[tuning["status"].eq("ok")].copy()
     if ok.empty:
         return _empty_year_split_predictions(), tuning
-    if config.effective_feature_version in V20_PEAK_TIMING_FEATURE_VERSIONS:
-        aggregate = ok.groupby("param_key", as_index=False).agg(
-            mean_metric=(metric_col, "mean"),
-            worst_metric=(metric_col, "max"),
-        )
-        selected_key = aggregate.sort_values(["mean_metric", "worst_metric", "param_key"]).iloc[0]["param_key"]
-        selected = ok.loc[ok["param_key"].eq(selected_key)].iloc[0]
-    else:
-        selected = ok.sort_values([metric_col, "param_key"]).iloc[0]
+    selected, _, _ = _select_stack_tuning_candidate(
+        tuning,
+        metric_col,
+        aggregate_folds=_uses_expanding_stack_validation(config),
+    )
     stack_features = _stack_features_for_set(
         str(selected["feature_set"]), config.effective_base_model_methods, config.providers
     )
@@ -2524,6 +2547,8 @@ def feature_columns(frame: pd.DataFrame, config: StationStackingConfig) -> tuple
         excluded.update(V11_DROPPED_FEATURE_COLUMNS)
     if version == V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION:
         excluded.update(V11_SETTLEMENT_FIX_DROPPED_FEATURE_COLUMNS)
+        excluded.update(V20_PEAK_TIMING_RAW_FEATURE_COLUMNS)
+        excluded.update(V20_ENGINEERED_FEATURE_COLUMNS)
     if version == "v12":
         excluded.update(V12_DROPPED_FEATURE_COLUMNS)
     if version == "v13":
@@ -4531,8 +4556,8 @@ def _best_iteration(estimator: Any) -> int | None:
 
 
 def _year_split_fold_weight(fold: YearSplitFold, config: StationStackingConfig | None = None) -> float:
-    if config is not None and config.year_split_validation_weights is not None:
-        return float(config.year_split_validation_weights.get(fold.validation_year, 1.0))
+    if config is not None and config.effective_year_split_validation_weights is not None:
+        return float(config.effective_year_split_validation_weights.get(fold.validation_year, 1.0))
     return float(YEAR_SPLIT_VALIDATION_WEIGHTS.get(fold.validation_year, 1.0))
 
 
@@ -4585,17 +4610,57 @@ def _stack_meta_train_valid_split(stack_source: pd.DataFrame) -> tuple[pd.DataFr
 
 
 def _uses_expanding_stack_validation(config: StationStackingConfig) -> bool:
-    """Select V20-aligned stack validation from the fold policy, not feature names."""
-    return config.effective_year_split_folds == V20_EXPANDING_FOLDS
+    """Select expanding stack validation from the explicit training profile."""
+    return config.effective_training_profile == TRAINING_PROFILE_V20_ALIGNED
+
+
+def _select_stack_tuning_candidate(
+    tuning: pd.DataFrame,
+    metric_col: str,
+    *,
+    aggregate_folds: bool,
+) -> tuple[pd.Series, pd.DataFrame, dict[str, Any]]:
+    """Select one Ridge trial identically for evaluation and artifact export."""
+    if metric_col not in {"mae_f", "rmse_f", "bucket_log_loss"}:
+        raise ValueError("metric_col must be 'mae_f', 'rmse_f', or 'bucket_log_loss'")
+    ok = tuning.loc[tuning["status"].astype(str).str.lower().eq("ok")].copy()
+    if ok.empty:
+        raise ValueError("No successful ridge stack tuning rows are available.")
+    if aggregate_folds:
+        aggregate = ok.groupby("param_key", as_index=False).agg(
+            mean_metric=(metric_col, "mean"),
+            worst_metric=(metric_col, "max"),
+        )
+        selected_key = aggregate.sort_values(
+            ["mean_metric", "worst_metric", "param_key"]
+        ).iloc[0]["param_key"]
+    else:
+        selected_key = ok.sort_values([metric_col, "param_key"]).iloc[0]["param_key"]
+    selected_rows = ok.loc[ok["param_key"].eq(selected_key)].copy()
+    selected = selected_rows.iloc[0]
+    summary = {
+        "mean_metric": float(pd.to_numeric(selected_rows[metric_col], errors="coerce").mean()),
+        "worst_metric": float(pd.to_numeric(selected_rows[metric_col], errors="coerce").max()),
+        "fold_count": int(selected_rows["fold"].nunique()) if "fold" in selected_rows else int(len(selected_rows)),
+        "selection_rule": (
+            "mean_metric_then_worst_metric_then_param_key"
+            if aggregate_folds
+            else "best_metric_then_param_key"
+        ),
+    }
+    return selected, selected_rows, summary
 
 
 def _v20_stack_meta_splits(stack_source: pd.DataFrame) -> list[tuple[int, pd.DataFrame, pd.DataFrame]]:
     years = pd.to_datetime(stack_source["contract_date"], errors="coerce").dt.year
-    available_years = sorted(int(year) for year in years.dropna().unique())
+    eligible = years.between(
+        min(V20_EXPANDING_FOLDS, key=lambda fold: fold.validation_year).validation_year,
+        max(V20_EXPANDING_FOLDS, key=lambda fold: fold.validation_year).validation_year,
+    )
     splits: list[tuple[int, pd.DataFrame, pd.DataFrame]] = []
-    for validation_year in available_years[1:]:
-        train = stack_source.loc[years.lt(validation_year)].copy()
-        valid = stack_source.loc[years.eq(validation_year)].copy()
+    for validation_year in V20_STACK_META_VALIDATION_YEARS:
+        train = stack_source.loc[eligible & years.lt(validation_year)].copy()
+        valid = stack_source.loc[eligible & years.eq(validation_year)].copy()
         if not train.empty and not valid.empty:
             splits.append((validation_year, train, valid))
     return splits
@@ -4671,15 +4736,9 @@ def _optuna_study_name(config: StationStackingConfig, *, stage: str, method: str
     target = config.effective_target_mode
     target_part = "" if target == TARGET_MODE_DIRECT_HIGH else f"_{target}"
     space_part = "" if space == "default" else f"_{space}"
-    stack_validation_part = (
-        "_expanding_stack_validation"
-        if stage == "stack" and _uses_expanding_stack_validation(config)
-        else ""
-    )
-    return (
-        f"{station}_{version}{target_part}_{stage}_{method}_{metric}{space_part}"
-        f"{stack_validation_part}"
-    )
+    profile = config.effective_training_profile
+    profile_part = "" if profile == TRAINING_PROFILE_LEGACY else f"_{profile}"
+    return f"{station}_{version}{target_part}{profile_part}_{stage}_{method}_{metric}{space_part}"
 
 
 def _remaining_optuna_trials(study: Any, target_trials: int) -> int:

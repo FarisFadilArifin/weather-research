@@ -8,6 +8,7 @@ from pathlib import Path
 TARGET_STATIONS = ("KATL", "KDAL")
 
 # Regression-test markers for the single V20 arm:
+# training_profile="v20_aligned"
 # feature_version="v20_peak_timing"
 # target_source="wunderground_only"
 # max_feature_missing_fraction=0.03
@@ -70,6 +71,22 @@ def _notebook(station_id: str) -> dict:
     ]
     for cell in notebook["cells"]:
         cell["source"] = [_replace_all(line, replacements) for line in cell.get("source", [])]
+
+    for cell in notebook["cells"]:
+        source = "".join(cell.get("source", []))
+        if "config = StationStackingConfig(" in source:
+            source = source.replace(
+                '    feature_version="v20_peak_timing",\n',
+                '    feature_version="v20_peak_timing",\n'
+                '    training_profile="v20_aligned",\n',
+            )
+        if "export_station_model_weights(" in source:
+            source = source.replace(
+                "        feature_version=config.effective_feature_version,\n",
+                "        feature_version=config.effective_feature_version,\n"
+                "        training_profile=config.effective_training_profile,\n",
+            )
+        cell["source"] = source.splitlines(keepends=True)
 
     notebook["cells"][0]["source"] = [
         f"# {station_id} Station Stacking V20 Peak Timing\n",

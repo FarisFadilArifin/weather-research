@@ -10,6 +10,7 @@ def test_v20_kdal_no_peak_notebook_matches_v20_contract_and_exports() -> None:
     generator = (notebook_root / "generate_station_notebook.py").read_text(encoding="utf-8")
 
     assert 'STATION_ID = "KDAL"' in generator
+    assert 'training_profile="v20_aligned"' in generator
     assert 'feature_version="v11_settlement_fix_temp"' in generator
     assert 'target_source="wunderground_only"' in generator
     assert "max_feature_missing_fraction=0.03" in generator
@@ -23,6 +24,7 @@ def test_v20_kdal_no_peak_notebook_matches_v20_contract_and_exports() -> None:
 
     assert notebook["nbformat"] == 4
     assert source.count("config = StationStackingConfig(") == 1
+    assert 'training_profile="v20_aligned"' in source
     assert 'feature_version="v11_settlement_fix_temp"' in source
     assert 'target_source="wunderground_only"' in source
     assert "max_feature_missing_fraction=0.03" in source
@@ -34,6 +36,7 @@ def test_v20_kdal_no_peak_notebook_matches_v20_contract_and_exports() -> None:
     assert 'source_pipeline="notebooks/station_stacking_v20_kdal_no_peak"' in source
     assert '"station_stacking_v20_kdal_no_peak"' in source
     assert "export_station_model_weights(" in source
+    assert "training_profile=config.effective_training_profile" in source
     assert 'feature_version="v20_peak_timing"' not in source
     assert "V20_PEAK_TIMING_RAW_FEATURE_COLUMNS" not in source
     assert "V20_ENGINEERED_FEATURE_COLUMNS" not in source
@@ -48,6 +51,7 @@ def test_v20_kdal_no_peak_notebook_matches_v20_contract_and_exports() -> None:
     config = StationStackingConfig(
         station_id="KDAL",
         feature_version="v11_settlement_fix_temp",
-        year_split_folds=V20_EXPANDING_FOLDS,
+        training_profile="v20_aligned",
     )
+    assert config.effective_year_split_folds == V20_EXPANDING_FOLDS
     assert _uses_expanding_stack_validation(config)

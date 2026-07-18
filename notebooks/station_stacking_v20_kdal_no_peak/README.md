@@ -6,8 +6,9 @@ This KDAL-only notebook keeps the V11 Settlement Fix feature contract while alig
 - `v11_settlement_fix_temp` features and no V20 HRRR/NBM peak-timing features;
 - Wunderground-only settlement targets;
 - 3% train-fold feature-missingness gate;
-- expanding validation folds for 2022, 2023, 2024, and 2025 with equal weights;
+- explicit `training_profile="v20_aligned"`, which owns four equal-weight base folds for 2022-2025 and three expanding ridge meta-folds for 2023-2025;
 - XGBoost, LightGBM, and CatBoost base learners with the ridge stack;
+- aggregate ridge selection by mean MAE, worst-fold MAE, then trial key, using the same selector for evaluation and export;
 - MAE-based tuning and a 2026 test refit; and
 - enabled export to `data/calibration/station_stacking_v20_kdal_no_peak/model_weights` after a successful full notebook run.
 

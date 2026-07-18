@@ -181,22 +181,64 @@ def test_stack_meta_split_uses_all_years_before_latest_year() -> None:
     assert valid["contract_date"].tolist() == ["2025-01-01"]
 
 
-def test_expanding_stack_validation_is_selected_by_fold_policy_not_feature_version() -> None:
-    aligned = StationStackingConfig(
+def test_v20_stack_meta_splits_expand_through_2023_to_2025() -> None:
+    source = pd.DataFrame(
+        {
+            "contract_date": [
+                "2021-01-01",
+                "2022-01-01",
+                "2023-01-01",
+                "2024-01-01",
+                "2025-01-01",
+                "2026-01-01",
+            ],
+            "actual_high_f": [69.0, 70.0, 71.0, 72.0, 73.0, 74.0],
+        }
+    )
+
+    splits = station_stacking._v20_stack_meta_splits(source)
+
+    assert [validation_year for validation_year, _, _ in splits] == [2023, 2024, 2025]
+    assert [
+        pd.to_datetime(train["contract_date"]).dt.year.tolist()
+        for _, train, _ in splits
+    ] == [[2022], [2022, 2023], [2022, 2023, 2024]]
+
+
+def test_v20_training_profile_aligns_fold_and_study_policies_across_feature_versions() -> None:
+    katl = StationStackingConfig(
+        station_id="KATL",
+        feature_version="v20_peak_timing",
+        training_profile="v20_aligned",
+    )
+    kdal = StationStackingConfig(
         station_id="KDAL",
         feature_version="v11_settlement_fix_temp",
-        year_split_folds=station_stacking.V20_EXPANDING_FOLDS,
+        training_profile="v20_aligned",
     )
     legacy = StationStackingConfig(
         station_id="KDAL",
         feature_version="v11_settlement_fix_temp",
     )
 
-    assert station_stacking._uses_expanding_stack_validation(aligned)
+    assert katl.effective_year_split_folds == kdal.effective_year_split_folds
+    assert katl.effective_year_split_folds == station_stacking.V20_EXPANDING_FOLDS
+    assert katl.effective_year_split_validation_weights == kdal.effective_year_split_validation_weights
+    assert katl.effective_year_split_validation_weights == {2022: 1.0, 2023: 1.0, 2024: 1.0, 2025: 1.0}
+    assert station_stacking._uses_expanding_stack_validation(katl)
+    assert station_stacking._uses_expanding_stack_validation(kdal)
     assert not station_stacking._uses_expanding_stack_validation(legacy)
-    assert station_stacking._optuna_study_name(
-        aligned, stage="stack", method="ridge_stack"
-    ).endswith("_expanding_stack_validation")
+    assert "_v20_aligned_base_xgboost_" in station_stacking._optuna_study_name(
+        katl, stage="base", method="xgboost"
+    )
+    assert "_v20_aligned_stack_ridge_stack_" in station_stacking._optuna_study_name(
+        kdal, stage="stack", method="ridge_stack"
+    )
+    assert "v20_aligned" not in station_stacking._optuna_study_name(
+        legacy, stage="stack", method="ridge_stack"
+    )
+    with pytest.raises(ValueError, match="training_profile"):
+        StationStackingConfig(station_id="KDAL", training_profile="v21").effective_training_profile
 
 
 def test_station_stacking_config_accepts_remaining_warmup_target_mode() -> None:
@@ -3174,6 +3216,7 @@ def test_export_v18_manifest_records_ridge_stack_bucket_policy_and_wunderground_
     assert bundle["final_model_method"] == "ridge_stack"
     assert bundle["target_source"] == "wunderground_only"
     assert bundle["feature_version"] == "v18"
+    assert bundle["training_profile"] == "legacy"
     assert bundle["optuna_metric"] == "mae_f"
     assert bundle["residual_calibrator"]["source"] == "validation_predictions"
     assert bundle["residual_calibrator"]["row_count"] == 3
@@ -3181,7 +3224,12 @@ def test_export_v18_manifest_records_ridge_stack_bucket_policy_and_wunderground_
     assert manifest["model_contract"]["final_model_method"] == "ridge_stack"
     assert manifest["model_contract"]["target_source"] == "wunderground_only"
     assert manifest["model_contract"]["feature_version"] == "v18"
+    assert manifest["model_contract"]["training_profile"] == "legacy"
     assert manifest["model_contract"]["optuna_metric"] == "mae_f"
+    assert manifest["training_validation"]["training_profile"] == "legacy"
+    assert manifest["training_validation"]["base_fold_policy"] == "configured_legacy_folds"
+    assert manifest["training_validation"]["stack_validation_mode"] == "single_latest_meta_year"
+    assert manifest["training_validation"]["selected_ridge_trial"] == "stack_low_mae"
     assert manifest["stack_model"]["param_key"] == "stack_low_mae"
     assert manifest["stack_model"]["selection_metric"] == "mae_f"
     assert manifest["stack_model"]["validation_mae_f"] == 0.5
@@ -3272,6 +3320,72 @@ def test_export_stack_model_selection_can_use_mae_metric() -> None:
     assert bucket_manifest["param_key"] == "best_bucket"
     assert bucket_manifest["selection_metric"] == "bucket_log_loss"
     assert bucket_manifest["validation_bucket_log_loss"] == 0.1
+
+
+def test_notebook_and_exporter_share_v20_aggregate_ridge_selection() -> None:
+    validation_rows = []
+    for date, actual in [("2024-01-01", 74.0), ("2025-01-01", 75.0)]:
+        for method, predicted in {
+            "xgboost": actual,
+            "lightgbm": actual + 0.1,
+            "catboost": actual - 0.1,
+        }.items():
+            validation_rows.append(
+                {
+                    "contract_date": date,
+                    "method": method,
+                    "actual_high_f": actual,
+                    "predicted_high_f": predicted,
+                }
+            )
+    validation_predictions = pd.DataFrame(validation_rows)
+    tuning_rows = []
+    for param_key, alpha, fold_maes in (
+        ("single_fold_star", 1.0, (0.1, 2.0, 2.0)),
+        ("aggregate_star", 2.0, (1.0, 1.0, 1.0)),
+    ):
+        for validation_year, mae_f in zip((2023, 2024, 2025), fold_maes, strict=True):
+            tuning_rows.append(
+                {
+                    "method": "ridge_stack",
+                    "param_key": param_key,
+                    "feature_set": "models_only",
+                    "alpha": alpha,
+                    "fit_intercept": True,
+                    "fold": f"meta_to_{validation_year}",
+                    "mae_f": mae_f,
+                    "rmse_f": mae_f + 0.1,
+                    "bucket_log_loss": mae_f + 0.2,
+                    "status": "ok",
+                }
+            )
+    stack_tuning = pd.DataFrame(tuning_rows)
+
+    selected, _, summary = station_stacking._select_stack_tuning_candidate(
+        stack_tuning,
+        "mae_f",
+        aggregate_folds=True,
+    )
+    _, export_manifest = export_station_stacking_v2_models._fit_stack_model(
+        validation_predictions,
+        stack_tuning,
+        metric_col="mae_f",
+        training_profile="v20_aligned",
+    )
+    legacy_selected, _, legacy_summary = station_stacking._select_stack_tuning_candidate(
+        stack_tuning,
+        "mae_f",
+        aggregate_folds=False,
+    )
+
+    assert selected["param_key"] == "aggregate_star"
+    assert export_manifest["param_key"] == selected["param_key"]
+    assert export_manifest["validation_mean_selection_metric"] == pytest.approx(summary["mean_metric"])
+    assert export_manifest["validation_worst_selection_metric"] == pytest.approx(summary["worst_metric"])
+    assert export_manifest["validation_fold_count"] == summary["fold_count"] == 3
+    assert export_manifest["selection_rule"] == "mean_metric_then_worst_metric_then_param_key"
+    assert legacy_selected["param_key"] == "single_fold_star"
+    assert legacy_summary["selection_rule"] == "best_metric_then_param_key"
 
 
 def test_v11_settlement_fix_notebooks_are_single_arm_and_parseable() -> None:
@@ -3434,7 +3548,10 @@ def test_v20_readiness_uses_three_percent_boundary_and_reports_incomplete_year()
 
 
 def test_v20_expanding_folds_are_chronological_and_equal_weighted() -> None:
-    assert [(fold.train_start_year, fold.train_end_year, fold.validation_year) for fold in station_stacking.V20_EXPANDING_FOLDS] == [
+    assert [
+        (fold.train_start_year, fold.train_end_year, fold.validation_year)
+        for fold in station_stacking.V20_EXPANDING_FOLDS
+    ] == [
         (2021, 2021, 2022),
         (2021, 2022, 2023),
         (2021, 2023, 2024),
@@ -3442,10 +3559,15 @@ def test_v20_expanding_folds_are_chronological_and_equal_weighted() -> None:
     ]
     config = StationStackingConfig(
         station_id="KATL",
-        year_split_folds=station_stacking.V20_EXPANDING_FOLDS,
-        year_split_validation_weights={2022: 1.0, 2023: 1.0, 2024: 1.0, 2025: 1.0},
+        training_profile="v20_aligned",
+        year_split_folds=station_stacking.YEAR_SPLIT_FOLDS,
+        year_split_validation_weights={2022: 9.0, 2023: 9.0, 2024: 9.0, 2025: 9.0},
     )
-    assert all(station_stacking._year_split_fold_weight(fold, config) == 1.0 for fold in station_stacking.V20_EXPANDING_FOLDS)
+    assert config.effective_year_split_folds == station_stacking.V20_EXPANDING_FOLDS
+    assert all(
+        station_stacking._year_split_fold_weight(fold, config) == 1.0
+        for fold in station_stacking.V20_EXPANDING_FOLDS
+    )
     assert all(fold.train_end_year < fold.validation_year for fold in station_stacking.V20_EXPANDING_FOLDS)
 
 
@@ -3453,6 +3575,7 @@ def test_v20_notebooks_are_single_arm_and_parseable() -> None:
     root = Path(__file__).resolve().parents[1]
     notebook_root = root / "notebooks" / "station_stacking_v20_peak_timing"
     generator_source = (notebook_root / "generate_station_notebooks.py").read_text(encoding="utf-8")
+    assert 'training_profile="v20_aligned"' in generator_source
     assert 'feature_version="v20_peak_timing"' in generator_source
     assert 'target_source="wunderground_only"' in generator_source
     assert "year_split_folds=V20_EXPANDING_FOLDS" in generator_source
@@ -3464,14 +3587,45 @@ def test_v20_notebooks_are_single_arm_and_parseable() -> None:
         notebook = json.loads(path.read_text(encoding="utf-8"))
         source = "".join("".join(cell.get("source", [])) for cell in notebook["cells"])
         assert source.count("config = StationStackingConfig(") == 1
+        assert 'training_profile="v20_aligned"' in source
         assert 'feature_version="v20_peak_timing"' in source
         assert 'target_source="wunderground_only"' in source
         assert "year_split_folds=V20_EXPANDING_FOLDS" in source
         assert '"station_stacking_v20_peak_timing"' in source
         assert "v15_" not in source.lower()
         assert "EXPORT_MODEL_WEIGHTS = False" in source
+        assert "training_profile=config.effective_training_profile" in source
         assert "ARMS" not in source
         assert "v15_" not in source
+
+
+def test_kdal_v20_aligned_no_peak_feature_inventory_excludes_peak_timing_fields() -> None:
+    peak_timing_features = {
+        *station_stacking.V20_PEAK_TIMING_RAW_FEATURE_COLUMNS,
+        *station_stacking.V20_ENGINEERED_FEATURE_COLUMNS,
+    }
+    frame = pd.DataFrame(
+        {
+            "actual_high_f": [80.0],
+            "day_of_week": ["Monday"],
+            **{column: [1.0] for column in station_stacking.V11_FEATURE_COLUMNS},
+            **{
+                column: [1.0]
+                for column in station_stacking.V11_SETTLEMENT_FIX_TEMP_FEATURE_COLUMNS
+            },
+            **{column: [1.0] for column in peak_timing_features},
+        }
+    )
+    config = StationStackingConfig(
+        station_id="KDAL",
+        feature_version="v11_settlement_fix_temp",
+        training_profile="v20_aligned",
+    )
+
+    _, numeric = station_stacking.feature_columns(frame, config)
+
+    assert peak_timing_features.isdisjoint(numeric)
+    assert set(station_stacking.V11_SETTLEMENT_FIX_TEMP_FEATURE_COLUMNS).issubset(numeric)
 
 
 def test_v20_kdal_fix_allows_nbm_and_hrrr_physics_but_blocks_hrrr_temperature_curve() -> None:
