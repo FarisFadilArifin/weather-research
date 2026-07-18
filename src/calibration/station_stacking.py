@@ -1899,7 +1899,7 @@ def tune_year_split_stack_model(
     from sklearn.linear_model import Ridge
 
     meta_train, meta_valid = _stack_meta_train_valid_split(train_source)
-    if config.effective_feature_version in V20_PEAK_TIMING_FEATURE_VERSIONS:
+    if _uses_expanding_stack_validation(config):
         meta_splits = _v20_stack_meta_splits(train_source)
     else:
         meta_year = int(pd.to_datetime(meta_valid["contract_date"], errors="coerce").dt.year.max()) if not meta_valid.empty else -1
@@ -4584,6 +4584,11 @@ def _stack_meta_train_valid_split(stack_source: pd.DataFrame) -> tuple[pd.DataFr
     return ordered.iloc[:split_at].copy(), ordered.iloc[split_at:].copy()
 
 
+def _uses_expanding_stack_validation(config: StationStackingConfig) -> bool:
+    """Select V20-aligned stack validation from the fold policy, not feature names."""
+    return config.effective_year_split_folds == V20_EXPANDING_FOLDS
+
+
 def _v20_stack_meta_splits(stack_source: pd.DataFrame) -> list[tuple[int, pd.DataFrame, pd.DataFrame]]:
     years = pd.to_datetime(stack_source["contract_date"], errors="coerce").dt.year
     available_years = sorted(int(year) for year in years.dropna().unique())
@@ -4666,7 +4671,15 @@ def _optuna_study_name(config: StationStackingConfig, *, stage: str, method: str
     target = config.effective_target_mode
     target_part = "" if target == TARGET_MODE_DIRECT_HIGH else f"_{target}"
     space_part = "" if space == "default" else f"_{space}"
-    return f"{station}_{version}{target_part}_{stage}_{method}_{metric}{space_part}"
+    stack_validation_part = (
+        "_expanding_stack_validation"
+        if stage == "stack" and _uses_expanding_stack_validation(config)
+        else ""
+    )
+    return (
+        f"{station}_{version}{target_part}_{stage}_{method}_{metric}{space_part}"
+        f"{stack_validation_part}"
+    )
 
 
 def _remaining_optuna_trials(study: Any, target_trials: int) -> int:

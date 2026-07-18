@@ -343,7 +343,15 @@ def _fit_stack_model(
     ok = stack_tuning.loc[stack_tuning["status"].astype(str).str.lower().eq("ok")].copy()
     if ok.empty:
         raise ValueError("No successful ridge stack tuning rows are available.")
-    selected = ok.sort_values([metric_col, "param_key"]).iloc[0]
+    aggregate = ok.groupby("param_key", as_index=False).agg(
+        mean_metric=(metric_col, "mean"),
+        worst_metric=(metric_col, "max"),
+    )
+    selected_key = aggregate.sort_values(
+        ["mean_metric", "worst_metric", "param_key"]
+    ).iloc[0]["param_key"]
+    selected_rows = ok.loc[ok["param_key"].eq(selected_key)].copy()
+    selected = selected_rows.iloc[0]
     feature_set = str(selected["feature_set"])
     available_methods = set(validation_predictions.get("method", pd.Series(dtype=str)).astype(str))
     ordered_providers = tuple(
@@ -369,9 +377,12 @@ def _fit_stack_model(
         "features": stack_features,
         "alpha": float(selected["alpha"]),
         "fit_intercept": _coerce_bool(selected["fit_intercept"]),
-        "validation_rmse_f": _jsonable(selected.get("rmse_f")),
-        "validation_mae_f": _jsonable(selected.get("mae_f")),
-        "validation_bucket_log_loss": _jsonable(selected.get("bucket_log_loss")),
+        "validation_rmse_f": _jsonable(selected_rows["rmse_f"].mean()),
+        "validation_mae_f": _jsonable(selected_rows["mae_f"].mean()),
+        "validation_bucket_log_loss": _jsonable(
+            selected_rows["bucket_log_loss"].mean()
+        ),
+        "validation_fold_count": int(selected_rows["fold"].nunique()),
         "selection_metric": metric_col,
         "meta_train_rows": int(len(train)),
         "meta_train_first_contract_date": str(train["contract_date"].min()),

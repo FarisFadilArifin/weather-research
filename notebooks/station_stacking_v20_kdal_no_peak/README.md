@@ -18,3 +18,9 @@ Regenerate the notebook with:
 ```
 
 The experiment uses the existing `v11_settlement_fix_temp` feature version intentionally. A new feature version is unnecessary because this arm changes labels and validation policy, not feature engineering.
+
+The complete cross-repository handoff and ready-to-paste prompt are maintained at:
+
+```text
+D:\dev\polymarket-weather-prediction\docs\KDAL_V20_NO_PEAK_HANDOFF_PROMPT.md
+```

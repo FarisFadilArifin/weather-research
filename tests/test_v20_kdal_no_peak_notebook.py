@@ -38,3 +38,16 @@ def test_v20_kdal_no_peak_notebook_matches_v20_contract_and_exports() -> None:
     assert "V20_PEAK_TIMING_RAW_FEATURE_COLUMNS" not in source
     assert "V20_ENGINEERED_FEATURE_COLUMNS" not in source
     assert "v20_peak_timing_readiness" not in source
+
+    from src.calibration.station_stacking import (
+        StationStackingConfig,
+        V20_EXPANDING_FOLDS,
+        _uses_expanding_stack_validation,
+    )
+
+    config = StationStackingConfig(
+        station_id="KDAL",
+        feature_version="v11_settlement_fix_temp",
+        year_split_folds=V20_EXPANDING_FOLDS,
+    )
+    assert _uses_expanding_stack_validation(config)

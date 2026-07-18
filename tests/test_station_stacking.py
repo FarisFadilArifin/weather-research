@@ -181,6 +181,24 @@ def test_stack_meta_split_uses_all_years_before_latest_year() -> None:
     assert valid["contract_date"].tolist() == ["2025-01-01"]
 
 
+def test_expanding_stack_validation_is_selected_by_fold_policy_not_feature_version() -> None:
+    aligned = StationStackingConfig(
+        station_id="KDAL",
+        feature_version="v11_settlement_fix_temp",
+        year_split_folds=station_stacking.V20_EXPANDING_FOLDS,
+    )
+    legacy = StationStackingConfig(
+        station_id="KDAL",
+        feature_version="v11_settlement_fix_temp",
+    )
+
+    assert station_stacking._uses_expanding_stack_validation(aligned)
+    assert not station_stacking._uses_expanding_stack_validation(legacy)
+    assert station_stacking._optuna_study_name(
+        aligned, stage="stack", method="ridge_stack"
+    ).endswith("_expanding_stack_validation")
+
+
 def test_station_stacking_config_accepts_remaining_warmup_target_mode() -> None:
     assert StationStackingConfig(station_id="KATL").effective_target_mode == "actual_high"
     assert (
