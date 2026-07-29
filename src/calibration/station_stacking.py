@@ -21,7 +21,7 @@ from .data_quality import (
 
 TARGET_STATIONS = ("KATL", "KAUS", "KORD", "KDAL", "KHOU", "KLAX", "KMIA", "KLGA", "KSEA")
 TARGET_PROVIDERS = ("gfs", "hrrr")
-OPTIONAL_PROVIDERS = ("nbm",)
+OPTIONAL_PROVIDERS = ("nbm", "gefs", "jma_msm")
 TARGET = "actual_high_f"
 TARGET_SOURCE_IEM_HOURLY = "iem_hourly"
 TARGET_SOURCE_SETTLEMENT_FIRST = "settlement_first"
@@ -36,6 +36,7 @@ TIMING_MODE_SAME_DAY_11AM = "same_day_11am"
 TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE = "same_day_11am_live_safe"
 TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE = "same_day_9am_live_safe"
 V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION = "v11_settlement_fix_temp"
+V20_ASIA_NO_PEAK_FEATURE_VERSION = "v20_asia_no_peak"
 V15_FEATURE_VERSIONS = ("v15_base", "v15_forecast_temp_at_as_of", "v15_precip_cloud")
 V16_FEATURE_VERSIONS = ("v16_fused",)
 V17_FEATURE_VERSIONS = ("v17_importance_015",)
@@ -64,14 +65,15 @@ SUPPORTED_FEATURE_VERSIONS = (
     *V18_1_FEATURE_VERSIONS,
     V20_FEATURE_VERSION,
     V20_KDAL_FIX_FEATURE_VERSION,
+    V20_ASIA_NO_PEAK_FEATURE_VERSION,
 )
-CURRENT_OBS_TREND_FEATURE_VERSIONS = {"v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}
-CLIMATOLOGY_FEATURE_VERSIONS = {"v9", "v10", "v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}
-HUBER_STACK_FEATURE_VERSIONS = {"v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}
-CATBOOST_HUBER_FEATURE_VERSIONS = {"v10", "v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}
+CURRENT_OBS_TREND_FEATURE_VERSIONS = {"v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}
+CLIMATOLOGY_FEATURE_VERSIONS = {"v9", "v10", "v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}
+HUBER_STACK_FEATURE_VERSIONS = {"v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}
+CATBOOST_HUBER_FEATURE_VERSIONS = {"v10", "v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}
 V14_ADDITIONAL_MIN_NON_NULL_FRACTION = 0.80
 V15_ADDITIONAL_MIN_TRAIN_NON_NULL_FRACTION = 0.70
-WEATHER_AGGREGATE_FEATURE_VERSIONS = {"v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, "v15_forecast_temp_at_as_of", "v15_precip_cloud", "v16_fused", "v17_importance_015", *V20_PEAK_TIMING_FEATURE_VERSIONS}
+WEATHER_AGGREGATE_FEATURE_VERSIONS = {"v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION, "v15_forecast_temp_at_as_of", "v15_precip_cloud", "v16_fused", "v17_importance_015", *V20_PEAK_TIMING_FEATURE_VERSIONS}
 GUARDED_BLEND_CAPS_F = (1.0, 2.0, 3.0)
 V18_NBM_RAP_SHARD_ROOT = Path("data/calibration/nbm_rap_features_shards_priority_20260702_full")
 V20_PEAK_TIMING_SHARD_ROOTS = (
@@ -750,6 +752,7 @@ class StationStackingConfig:
     feature_importance_repeats: int | None = None
     max_feature_missing_fraction: float | None = None
     output_dir: str | Path | None = None
+    prebuilt_features: pd.DataFrame | None = None
 
     def resolved_project_root(self) -> Path:
         return Path(self.project_root).resolve()
@@ -915,13 +918,18 @@ class StationStackingConfig:
 
     @property
     def effective_year_split_folds(self) -> tuple["YearSplitFold", ...]:
-        if self.effective_training_profile == TRAINING_PROFILE_V20_ALIGNED:
+        if self.effective_training_profile == TRAINING_PROFILE_V20_ALIGNED and (
+            self.year_split_folds is None or self.effective_feature_version != V20_ASIA_NO_PEAK_FEATURE_VERSION
+        ):
             return V20_EXPANDING_FOLDS
         return tuple(self.year_split_folds) if self.year_split_folds is not None else YEAR_SPLIT_FOLDS
 
     @property
     def effective_year_split_validation_weights(self) -> dict[int, float] | None:
-        if self.effective_training_profile == TRAINING_PROFILE_V20_ALIGNED:
+        if self.effective_training_profile == TRAINING_PROFILE_V20_ALIGNED and (
+            self.year_split_validation_weights is None
+            or self.effective_feature_version != V20_ASIA_NO_PEAK_FEATURE_VERSION
+        ):
             return {fold.validation_year: 1.0 for fold in V20_EXPANDING_FOLDS}
         return self.year_split_validation_weights
 
@@ -1432,14 +1440,18 @@ def summarize_predictions(predictions: pd.DataFrame) -> pd.DataFrame:
 
 
 def run_station_stacking_experiment(config: StationStackingConfig) -> StationStackingResult:
-    features = build_station_wide_dataset(
-        config.resolved_project_root(),
-        station_id=config.station_id,
-        timing_mode=config.timing_mode,
-        providers=config.providers,
-        feature_version=config.effective_feature_version,
-        target_source=config.effective_target_source,
-        climatology_normals_path=config.climatology_normals_path,
+    features = (
+        config.prebuilt_features.copy()
+        if config.prebuilt_features is not None
+        else build_station_wide_dataset(
+            config.resolved_project_root(),
+            station_id=config.station_id,
+            timing_mode=config.timing_mode,
+            providers=config.providers,
+            feature_version=config.effective_feature_version,
+            target_source=config.effective_target_source,
+            climatology_normals_path=config.climatology_normals_path,
+        )
     )
     baseline_predictions = raw_baseline_predictions(features, config)
     model_predictions = walk_forward_base_model_predictions(features, config)
@@ -1482,14 +1494,18 @@ def run_station_year_split_experiment(config: StationStackingConfig) -> YearSpli
     folds = config.effective_year_split_folds
     test_train_years = config.effective_year_split_test_train_years
     test_year = config.effective_year_split_test_year
-    features = build_station_wide_dataset(
-        config.resolved_project_root(),
-        station_id=config.station_id,
-        timing_mode=config.timing_mode,
-        providers=config.providers,
-        feature_version=config.effective_feature_version,
-        target_source=config.effective_target_source,
-        climatology_normals_path=config.climatology_normals_path,
+    features = (
+        config.prebuilt_features.copy()
+        if config.prebuilt_features is not None
+        else build_station_wide_dataset(
+            config.resolved_project_root(),
+            station_id=config.station_id,
+            timing_mode=config.timing_mode,
+            providers=config.providers,
+            feature_version=config.effective_feature_version,
+            target_source=config.effective_target_source,
+            climatology_normals_path=config.climatology_normals_path,
+        )
     )
     modeling_frame, categorical, numeric = _modeling_frame(features, config)
     feature_columns_frame = pd.DataFrame(
@@ -2545,7 +2561,7 @@ def feature_columns(frame: pd.DataFrame, config: StationStackingConfig) -> tuple
         excluded.update(V10_DROPPED_FEATURE_COLUMNS)
     if version == "v11":
         excluded.update(V11_DROPPED_FEATURE_COLUMNS)
-    if version == V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION:
+    if version in {V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION}:
         excluded.update(V11_SETTLEMENT_FIX_DROPPED_FEATURE_COLUMNS)
         excluded.update(V20_PEAK_TIMING_RAW_FEATURE_COLUMNS)
         excluded.update(V20_ENGINEERED_FEATURE_COLUMNS)
@@ -2603,7 +2619,7 @@ def feature_columns(frame: pd.DataFrame, config: StationStackingConfig) -> tuple
                 continue
             gated_numeric.append(column)
         numeric = gated_numeric
-    if version == V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION:
+    if version in {V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION}:
         additional = set(V11_SETTLEMENT_FIX_TEMP_FEATURE_COLUMNS)
         base = set(V11_FEATURE_COLUMNS)
         gated_numeric = []
@@ -3711,9 +3727,9 @@ def add_versioned_feature_engineering(
     if version == "base":
         return frame
     out = add_v5_feature_engineering(frame, providers=providers)
-    if version in {"v8", "v9", "v10", "v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}:
+    if version in {"v8", "v9", "v10", "v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}:
         out = add_v8_feature_engineering(out, providers=providers)
-        if version == V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION:
+        if version in {V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION}:
             return add_v11_settlement_fix_temp_feature_engineering(out, providers=providers)
         if version in V20_PEAK_TIMING_FEATURE_VERSIONS:
             out = add_v11_settlement_fix_temp_feature_engineering(out, providers=providers)

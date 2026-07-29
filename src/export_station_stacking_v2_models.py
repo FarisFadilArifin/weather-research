@@ -77,6 +77,7 @@ def export_station_model_weights(
     feature_pipeline: str | None = None,
     selected_guarded_cap_f: float | None = None,
     baseline_comparison: dict[str, Any] | None = None,
+    city_id: str | None = None,
 ) -> ExportedModelWeights:
     root = Path(project_root).resolve()
     station = station_id.upper()
@@ -182,6 +183,7 @@ def export_station_model_weights(
         "schema_version": 1,
         "model_version": model_version,
         "station_id": station,
+        "city_id": city_id,
         "target": TARGET,
         "target_mode": config.effective_target_mode,
         "target_source": config.effective_target_source,
@@ -219,6 +221,7 @@ def export_station_model_weights(
         "artifact_type": "station_high_regression_model_weights",
         "model_version": model_version,
         "station_id": station,
+        "city_id": city_id,
         "created_at_utc": datetime.now(UTC).isoformat(),
         "source_pipeline": source_pipeline,
         "source_artifact_dir": str(artifacts),
@@ -235,6 +238,7 @@ def export_station_model_weights(
         },
         "model_contract": {
             "timing_mode": config.timing_mode,
+            "city_id": city_id,
             "providers": list(config.providers),
             "feature_version": config.effective_feature_version,
             "training_profile": config.effective_training_profile,
@@ -342,6 +346,7 @@ def export_all_station_model_weights(
     feature_pipeline: str | None = None,
     selected_guarded_cap_f: float | None = None,
     baseline_comparison: dict[str, Any] | None = None,
+    city_id: str | None = None,
 ) -> list[ExportedModelWeights]:
     exports = [
         export_station_model_weights(
@@ -364,6 +369,7 @@ def export_all_station_model_weights(
             feature_pipeline=feature_pipeline,
             selected_guarded_cap_f=selected_guarded_cap_f,
             baseline_comparison=baseline_comparison,
+            city_id=city_id,
         )
         for station in stations
     ]
