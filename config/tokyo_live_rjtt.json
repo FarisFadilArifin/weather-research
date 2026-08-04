@@ -1,0 +1,15 @@
+{
+  "station_id": "RJTT",
+  "city_id": "tokyo",
+  "latitude": 35.553,
+  "longitude": 139.781,
+  "timezone": "Asia/Tokyo",
+  "settlement_source": "wunderground_only",
+  "timing_mode": "asia_same_day_11am_live_safe",
+  "feature_version": "v20_asia_no_peak",
+  "feature_pipeline": "station_stacking_v20_asia_no_peak",
+  "forecast_providers": ["gfs", "gefs", "jma_msm"],
+  "prediction_temperature_unit": "celsius",
+  "observation_window_local": ["10:40", "11:00"],
+  "entry_window_local": ["11:15", "12:00"]
+}
