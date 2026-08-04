@@ -1,7 +1,10 @@
+
 from __future__ import annotations
 
 import logging
 import os
+import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
@@ -14,6 +17,8 @@ import requests
 
 
 _DIRECT_NWP_IDX_CACHE: dict[str, str] = {}
+_DIRECT_NWP_HTTP_LOCAL = threading.local()
+_ECCODES_GRIB_RECOVERY_LOCK = threading.Lock()
 TRANSIENT_DIRECT_NWP_STATUS_CODES = {429, 500, 502, 503, 504}
 GFS_V16_LAYOUT_START_UTC = datetime(2021, 3, 23, tzinfo=UTC)
 
@@ -109,6 +114,17 @@ DIRECT_NWP_FEATURES: dict[str, dict[str, Any]] = {
     },
 }
 
+_DIRECT_NWP_GRIB_KEYS: dict[str, tuple[str, str, int]] = {
+    "temp_k_2m": ("2t", "heightAboveGround", 2),
+    "dewpoint_k_2m": ("2d", "heightAboveGround", 2),
+    "relative_humidity_pct_2m": ("2r", "heightAboveGround", 2),
+    "wind_u_ms_10m": ("10u", "heightAboveGround", 10),
+    "wind_v_ms_10m": ("10v", "heightAboveGround", 10),
+    "wind_gust_ms": ("gust", "surface", 0),
+    "precip_mm_1h": ("tp", "surface", 0),
+    "cloud_cover_pct": ("tcc", "atmosphere", 0),
+}
+
 
 def direct_nwp_file_url(model: str, issue_time: datetime, fxx: int) -> str:
     model = model.lower()
@@ -140,6 +156,7 @@ def extract_direct_nwp_run_feature_points(
     fxx_hours: list[int] | tuple[int, ...],
     force_refresh: bool = False,
     feature_fields: list[str] | None = None,
+    interpolation: str = "nearest",
 ) -> dict[str, dict[int, dict[str, float]]]:
     _ensure_ecmwflibs_available()
     try:
@@ -148,6 +165,9 @@ def extract_direct_nwp_run_feature_points(
         raise RuntimeError("xarray/cfgrib dependencies are required for direct NWP extraction") from exc
 
     model = model.lower()
+    interpolation = str(interpolation).strip().lower()
+    if interpolation not in {"nearest", "bilinear"}:
+        raise ValueError("interpolation must be 'nearest' or 'bilinear'")
     raw_path = Path(raw_dir) / model
     raw_path.mkdir(parents=True, exist_ok=True)
     fields = feature_fields or list(DIRECT_NWP_FEATURES)
@@ -176,15 +196,19 @@ def extract_direct_nwp_run_feature_points(
                     var_name = _first_present(ds, spec["names"]) or _first_data_var(ds)
                     if var_name is None:
                         continue
-                    if grid_indexers is None:
+                    if interpolation == "nearest" and grid_indexers is None:
                         grid_indexers = _nearest_point_indexers(ds, stations)
                     for station_code, station in stations.items():
-                        indexer = grid_indexers.get(station_code) if grid_indexers else None
-                        value = (
-                            _point_value_from_indexer(ds, var_name, indexer)
-                            if indexer is not None
-                            else _point_value(ds, var_name, station["lat"], station["lon"])
-                        )
+
+                        if interpolation == "bilinear":
+                            value = _point_value_bilinear(ds, var_name, station["lat"], station["lon"])
+                        else:
+                            indexer = grid_indexers.get(station_code) if grid_indexers else None
+                            value = (
+                                _point_value_from_indexer(ds, var_name, indexer)
+                                if indexer is not None
+                                else _point_value(ds, var_name, station["lat"], station["lon"])
+                            )
                         if value is not None and np.isfinite(value):
                             hourly_by_station[station_code][field] = float(value)
             except TransientDirectNwpDownloadError:
@@ -376,6 +400,7 @@ def _nearest_point_indexers(ds: Any, stations: dict[str, dict[str, float]]) -> d
         lon_values = np.asarray(lonv.values)
         for station_code, station in stations.items():
             longitude = float(station["lon"]) % 360
+
             out[station_code] = {
                 lat_dim: int(np.abs(lat_values - float(station["lat"])).argmin()),
                 lon_dim: int(np.abs(lon_values - longitude).argmin()),
@@ -408,7 +433,7 @@ def _download_direct_nwp_variable_subset(
 ) -> Path:
     local = raw_dir / f"{model}_{field}_{issue_time:%Y%m%d%H}_f{fxx:03d}.grib2"
     local.parent.mkdir(parents=True, exist_ok=True)
-    if local.exists() and local.stat().st_size > 0 and not force_refresh:
+    if local.exists() and _is_complete_grib2(local.read_bytes()) and not force_refresh:
         return local
     if local.exists():
         local.unlink()
@@ -424,12 +449,111 @@ def _download_direct_nwp_variable_subset(
             for start, end in ranges:
                 headers = {"Range": f"bytes={start}-{end}", "User-Agent": "weather-research/0.1"}
                 response = _get_with_retries(url, headers=headers, timeout=90)
-                handle.write(response.content)
+                content = response.content
+                if not _is_complete_grib2(content):
+                    content = _recover_index_mismatched_grib(url, idx_text, field, start, end)
+                handle.write(content)
         os.replace(tmp, local)
     finally:
         if tmp.exists():
             tmp.unlink()
     return local
+
+
+def _is_complete_grib2(content: bytes) -> bool:
+    if len(content) < 20 or content[:4] != b"GRIB" or content[7] != 2:
+        return False
+    message_length = int.from_bytes(content[8:16], "big")
+    return message_length == len(content) and content[-4:] == b"7777"
+
+
+def _recover_index_mismatched_grib(
+    url: str,
+    idx_text: str,
+    field: str,
+    indexed_start: int,
+    indexed_end: int,
+) -> bytes:
+    """Recover a GRIB message when an official object and its index disagree.
+
+    A small number of archived NOAA GFS objects contain valid messages but have
+    stale byte offsets in the adjacent inventory. Scan a bounded window and
+    accept only a message whose ecCodes identity and forecast interval exactly
+    match the requested inventory row.
+    """
+    expected_keys = _DIRECT_NWP_GRIB_KEYS.get(field)
+    if expected_keys is None:
+        raise RuntimeError(f"Cannot safely recover an index-mismatched GRIB field: {field}")
+    inventory_line = next(
+        (
+            line
+            for line in idx_text.splitlines()
+            if line.split(":", 2)[1:2] == [str(indexed_start)]
+        ),
+        "",
+    )
+    step_match = re.search(r":(\d+(?:-\d+)?) hour (?:fcst|acc fcst|ave fcst):", inventory_line)
+    expected_step = step_match.group(1) if step_match else None
+
+    # The affected archived run drifts in both directions (observed range:
+    # roughly -1.2 MB to +0.8 MB), so keep a conservative bounded margin.
+    scan_start = max(0, indexed_start - 2_000_000)
+    scan_end = indexed_end + 4_000_000
+    response = _get_with_retries(
+        url,
+        headers={
+            "Range": f"bytes={scan_start}-{scan_end}",
+            "User-Agent": "weather-research/0.1",
+        },
+        timeout=90,
+    )
+    try:
+        import eccodes
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("ecCodes is required to recover an index-mismatched GRIB") from exc
+
+    content = response.content
+    cursor = 0
+    while True:
+        offset = content.find(b"GRIB", cursor)
+        if offset < 0:
+            break
+        cursor = offset + 4
+        if offset + 16 > len(content) or content[offset + 7] != 2:
+            continue
+        length = int.from_bytes(content[offset + 8 : offset + 16], "big")
+        candidate = content[offset : offset + length]
+        if not _is_complete_grib2(candidate):
+            continue
+        # Some Windows ecCodes builds are not safe when message handles are
+        # created concurrently. Downloads stay parallel; metadata validation
+        # is serialized for the few messages that require recovery.
+        with _ECCODES_GRIB_RECOVERY_LOCK:
+            handle = None
+            try:
+                handle = eccodes.codes_new_from_message(candidate)
+                actual_keys = (
+                    str(eccodes.codes_get(handle, "shortName")),
+                    str(eccodes.codes_get(handle, "typeOfLevel")),
+                    int(eccodes.codes_get(handle, "level")),
+                )
+                actual_step = str(eccodes.codes_get(handle, "stepRange"))
+                if actual_keys == expected_keys and (expected_step is None or actual_step == expected_step):
+                    logging.warning(
+                        "Recovered stale GRIB index for %s f%s at byte %s (published byte %s)",
+                        field,
+                        actual_step,
+                        scan_start + offset,
+                        indexed_start,
+                    )
+                    return candidate
+            finally:
+                if handle is not None:
+                    eccodes.codes_release(handle)
+    raise RuntimeError(
+        f"Official GRIB index mismatch could not be recovered for {field} "
+        f"at published byte {indexed_start}"
+    )
 
 
 def _byte_ranges_for_patterns(idx_text: str, patterns: list[str]) -> list[tuple[int, int]]:
@@ -479,6 +603,37 @@ def _point_value(ds: Any, var_name: str, lat: float, lon: float) -> float | None
     return _scalar_value(ds[var_name].isel(indexer))
 
 
+
+def _point_value_bilinear(ds: Any, var_name: str, lat: float, lon: float) -> float | None:
+    """Linearly interpolate a regular latitude/longitude grid at one point.
+
+    ICON native/curvilinear grids do not expose independent 1-D coordinates;
+    those grids deliberately fall back to the existing nearest-cell behavior.
+    """
+    if "latitude" in ds and "longitude" in ds:
+        latv = ds["latitude"]
+        lonv = ds["longitude"]
+    elif "lat" in ds and "lon" in ds:
+        latv = ds["lat"]
+        lonv = ds["lon"]
+    else:
+        return _scalar_value(ds[var_name])
+
+    if getattr(latv, "ndim", 0) != 1 or getattr(lonv, "ndim", 0) != 1:
+        return _point_value(ds, var_name, lat, lon)
+    latitude_dim = latv.dims[0]
+    longitude_dim = lonv.dims[0]
+    longitude = float(lon) % 360
+    try:
+        interpolated = ds[var_name].interp(
+            {latitude_dim: float(lat), longitude_dim: longitude},
+            method="linear",
+        )
+        return _scalar_value(interpolated)
+    except Exception:  # noqa: BLE001
+        return _point_value(ds, var_name, lat, lon)
+
+
 def _scalar_value(value: Any) -> float | None:
     arr = np.asarray(getattr(value, "values", value)).astype(float)
     if arr.size == 0:
@@ -522,9 +677,20 @@ def _get_with_retries(url: str, timeout: int, headers: dict[str, str] | None = N
     request_headers = {"User-Agent": "weather-research/0.1"}
     if headers:
         request_headers.update(headers)
+    session = getattr(_DIRECT_NWP_HTTP_LOCAL, "session", None)
+    if session is None:
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=2,
+            pool_maxsize=2,
+            max_retries=0,
+        )
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        _DIRECT_NWP_HTTP_LOCAL.session = session
     for attempt in range(1, attempts + 1):
         try:
-            response = requests.get(url, timeout=timeout, headers=request_headers)
+            response = session.get(url, timeout=timeout, headers=request_headers)
             response.raise_for_status()
             return response
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
