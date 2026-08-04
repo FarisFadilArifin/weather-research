@@ -57,13 +57,19 @@ def clean_value(value: Any) -> Any:
 
 
 def git_commit(project_root: Path) -> str:
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=project_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    declared = os.environ.get("WEATHER_RESEARCH_SOURCE_COMMIT", "").strip()
+    if declared:
+        commit = declared
+    elif (project_root / ".source-commit").is_file():
+        commit = (project_root / ".source-commit").read_text(encoding="utf-8").strip()
+    else:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=project_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
     if len(commit) != 40 or any(ch not in "0123456789abcdef" for ch in commit.lower()):
         raise ValueError("invalid_source_commit")
     return commit
