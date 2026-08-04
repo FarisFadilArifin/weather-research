@@ -63,3 +63,12 @@ def test_payload_rejects_missing_provider_and_stale_observation():
             source_commit="a" * 40,
             generated_at=datetime.now(UTC),
         )
+
+
+def test_source_commit_can_be_declared_for_archive_deployments(tmp_path, monkeypatch):
+    monkeypatch.setenv("WEATHER_RESEARCH_SOURCE_COMMIT", "b" * 40)
+    assert MODULE.git_commit(tmp_path) == "b" * 40
+
+    monkeypatch.delenv("WEATHER_RESEARCH_SOURCE_COMMIT")
+    (tmp_path / ".source-commit").write_text("c" * 40 + "\n", encoding="utf-8")
+    assert MODULE.git_commit(tmp_path) == "c" * 40
