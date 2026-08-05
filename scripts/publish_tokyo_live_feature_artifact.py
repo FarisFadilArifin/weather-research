@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from src.asia_11am import CITY_PROFILES, run_live
-from src.calibration.asia_station_stacking import build_asia_station_wide_dataset
+from src.calibration.asia_station_stacking import build_asia_live_feature_row
 
 
 ARTIFACT_TYPE = "weather_bot_tokyo_feature_artifact_v1"
@@ -78,6 +78,9 @@ def git_commit(project_root: Path) -> str:
 def build_payload(
     frame: pd.DataFrame, contract_date: date, *, source_commit: str, generated_at: datetime
 ) -> dict[str, Any]:
+    alignment = frame.attrs.get("alignment")
+    if not isinstance(alignment, dict) or alignment.get("alignmentStatus") != "aligned":
+        raise ValueError("alignment_status_not_aligned")
     selected = frame.loc[
         frame["contract_date"].astype(str).eq(contract_date.isoformat())
     ]
@@ -114,6 +117,8 @@ def build_payload(
         "providers": list(PROVIDERS),
         "predictionTemperatureUnit": "celsius",
         "pointInTimeSafe": True,
+        "alignmentStatus": "aligned",
+        "alignment": alignment,
         "observationSource": inputs.get("observed_source"),
         "generatedAtUtc": generated_at.astimezone(UTC).isoformat(),
         "acquisitionSourceCommit": source_commit,
@@ -163,9 +168,11 @@ def main() -> int:
         )
         if result.get("status") != "complete":
             raise SystemExit("Tokyo live acquisition is incomplete")
-    frame = build_asia_station_wide_dataset(
+    frame = build_asia_live_feature_row(
         args.data_root,
         "tokyo",
+        day,
+        generated_at=current,
         feature_version=FEATURE_VERSION,
         providers=PROVIDERS,
     )

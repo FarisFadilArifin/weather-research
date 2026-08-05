@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -323,6 +326,306 @@ def build_asia_station_wide_dataset(
     wide = _add_observation_forecast_delta_features(wide, selected)
     wide = add_versioned_feature_engineering(wide, feature_version=feature_version, providers=selected)
     return add_strict_quality_flags(wide, providers=selected)
+
+
+def _latest_live_part(directory: Path, contract_date: date) -> Path:
+    paths = sorted(directory.glob(f"{contract_date.isoformat()}_*.parquet"))
+    if not paths:
+        raise FileNotFoundError(f"missing_live_input:{directory}:{contract_date}")
+    return paths[-1]
+
+
+def _composite_sha256(paths: list[Path]) -> str:
+    if not paths:
+        raise ValueError("source_checksum_missing")
+    digest = hashlib.sha256()
+    for path in sorted(paths):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+def _finite_columns(frame: pd.DataFrame, columns: tuple[str, ...]) -> bool:
+    return all(
+        column in frame
+        and pd.to_numeric(frame[column], errors="coerce").notna().all()
+        for column in columns
+    )
+
+
+def build_asia_live_feature_row(
+    data_root: str | Path,
+    city_id: str,
+    contract_date: date,
+    *,
+    generated_at: datetime,
+    feature_version: str = V20_ASIA_NO_PEAK_FEATURE_VERSION,
+    providers: tuple[str, ...] = ASIA_PROVIDERS,
+) -> pd.DataFrame:
+    """Build one target-free live row and retain its alignment proof in attrs."""
+    from ..asia_11am import (
+        GEFS_MEMBERS,
+        GEFS_TEMP_FORECAST_HOURS,
+        GEFS_TMAX_FORECAST_HOURS,
+        GFS_FIELDS,
+        GFS_FORECAST_HOURS,
+        JMA_BASE_FIELDS,
+        _jma_output_column,
+        forecast_timing,
+        summarize_gefs_members,
+    )
+    from ..direct_nwp_fetch import _available_direct_nwp_fxx_hours
+
+    city = str(city_id).strip().lower()
+    if city not in CITY_METADATA:
+        raise ValueError(f"Unknown Asia city: {city_id!r}")
+    metadata = CITY_METADATA[city]
+    station_id = str(metadata["station_id"])
+    timezone = str(metadata["timezone"])
+    selected = tuple(providers)
+    if set(selected) != set(ASIA_PROVIDERS):
+        raise ValueError("live_provider_contract_mismatch")
+    root = Path(data_root)
+    current = generated_at.astimezone(UTC)
+    cutoff_local = datetime.combine(contract_date, time(11), tzinfo=ZoneInfo(timezone))
+    cutoff_utc = cutoff_local.astimezone(UTC)
+    not_before_utc = cutoff_utc + timedelta(minutes=10)
+    if current < not_before_utc:
+        raise ValueError("collection_before_not_before")
+    timing = forecast_timing(contract_date)
+
+    observation_path = _latest_live_part(
+        root / "normalized" / "live" / "observations" / city, contract_date
+    )
+    observation = pd.read_parquet(observation_path)
+    if len(observation) != 1:
+        raise ValueError("metar_row_count")
+    observed = observation.iloc[0]
+    if str(observed.get("station_id") or "").upper() != station_id:
+        raise ValueError("metar_station_mismatch")
+    if str(observed.get("observed_source") or "") != "aviation_weather_center_metar":
+        raise ValueError("metar_source_mismatch")
+    if str(observed.get("observed_fetch_status") or "") != "ok":
+        raise ValueError("metar_unavailable")
+    observed_at = pd.to_datetime(observed.get("observed_as_of_time_local"), utc=True)
+    age_minutes = (pd.Timestamp(cutoff_utc) - observed_at).total_seconds() / 60.0
+    if observed_at > pd.Timestamp(cutoff_utc):
+        raise ValueError("metar_post_cutoff")
+    if age_minutes < 0 or age_minutes > 60:
+        raise ValueError("metar_too_old")
+    if not _finite_columns(
+        observation,
+        ("observed_temp_at_as_of_f", "observed_high_temp_through_as_of_f"),
+    ):
+        raise ValueError("metar_required_value_missing")
+    if not str(observed.get("source_uri") or "") or not str(observed.get("source_checksum") or ""):
+        raise ValueError("source_checksum_missing")
+
+    gfs_path = (
+        root / "normalized" / "forecasts" / "gfs" / city
+        / contract_date.strftime("%Y-%m") / f"{contract_date}.parquet"
+    )
+    gfs = pd.read_parquet(gfs_path)
+    expected_issue = pd.Timestamp(timing["issue_utc"])
+    expected_as_of = pd.Timestamp(timing["as_of_utc"])
+    gfs_issue = pd.to_datetime(gfs.get("issued_at_utc"), errors="coerce", utc=True)
+    gfs_as_of = pd.to_datetime(gfs.get("forecast_as_of_utc"), errors="coerce", utc=True)
+    if (
+        len(gfs) != len(GFS_FORECAST_HOURS)
+        or set(pd.to_numeric(gfs.get("forecast_hour"), errors="coerce").dropna().astype(int))
+        != set(GFS_FORECAST_HOURS)
+        or not gfs_issue.eq(expected_issue).all()
+        or not gfs_as_of.eq(expected_as_of).all()
+        or not gfs.get("fetch_status", pd.Series(dtype=str)).astype(str).eq("ok").all()
+    ):
+        raise ValueError("gfs_wrong_cycle_or_incomplete_hours")
+    gfs_required = tuple(
+        field.replace("_k_", "_c_") if "_k_" in field else field for field in GFS_FIELDS
+    )
+    if not _finite_columns(gfs, gfs_required):
+        raise ValueError("gfs_required_value_missing")
+
+    gefs_path = (
+        root / "normalized" / "forecasts" / "gefs" / city
+        / contract_date.strftime("%Y-%m") / f"{contract_date}.parquet"
+    )
+    gefs = pd.read_parquet(gefs_path)
+    gefs_issue = pd.to_datetime(gefs.get("issued_at_utc"), errors="coerce", utc=True)
+    member_hours = set(
+        zip(
+            gefs.get("member_id", pd.Series(dtype=str)).astype(str),
+            pd.to_numeric(gefs.get("forecast_hour"), errors="coerce").fillna(-1).astype(int),
+        )
+    )
+    expected_member_hours = set(
+        (member, hour) for member in GEFS_MEMBERS for hour in GEFS_TEMP_FORECAST_HOURS
+    )
+    if (
+        len(gefs) != len(expected_member_hours)
+        or member_hours != expected_member_hours
+        or not gefs_issue.eq(expected_issue).all()
+        or not gefs.get("fetch_status", pd.Series(dtype=str)).astype(str).eq("ok").all()
+        or not _finite_columns(gefs, ("temp_2m_c",))
+    ):
+        raise ValueError("gefs_wrong_cycle_or_missing_member")
+    required_tmax = gefs.loc[
+        pd.to_numeric(gefs["forecast_hour"], errors="coerce").isin(GEFS_TMAX_FORECAST_HOURS)
+    ]
+    if len(required_tmax) != len(GEFS_MEMBERS) * len(GEFS_TMAX_FORECAST_HOURS) or not _finite_columns(
+        required_tmax, ("tmax_3h_c",)
+    ):
+        raise ValueError("gefs_incomplete_tmax_intervals")
+    _members, gefs_daily = summarize_gefs_members(gefs)
+    if len(gefs_daily) != 1 or int(gefs_daily.iloc[0]["gefs_member_count"]) != len(GEFS_MEMBERS):
+        raise ValueError("gefs_missing_member")
+
+    jma_path = _latest_live_part(
+        root / "normalized" / "live" / "jma_msm_previous_day1" / city,
+        contract_date,
+    )
+    jma = pd.read_parquet(jma_path)
+    jma_hours = set(pd.to_numeric(jma.get("forecast_hour_local"), errors="coerce").dropna().astype(int))
+    jma_columns = tuple(_jma_output_column(field) for field in JMA_BASE_FIELDS)
+    if (
+        len(jma) != 13
+        or jma_hours != set(range(11, 24))
+        or not jma.get("lineage", pd.Series(dtype=str)).astype(str).eq("jma_msm_previous_day1").all()
+        or not jma.get("availability_basis", pd.Series(dtype=str)).astype(str).eq(
+            "open_meteo_previous_day1_variable"
+        ).all()
+        or not jma.get("fetch_status", pd.Series(dtype=str)).astype(str).eq("ok").all()
+        or not _finite_columns(jma, jma_columns)
+    ):
+        raise ValueError("jma_wrong_lineage_or_incomplete_hours")
+    if not jma.get("source_url", pd.Series(dtype=str)).astype(str).str.len().gt(0).all() or not jma.get(
+        "source_checksum", pd.Series(dtype=str)
+    ).astype(str).str.fullmatch(r"[0-9a-fA-F]{64}").all():
+        raise ValueError("source_checksum_missing")
+
+    wide = observation.copy()
+    wide["station_name"] = metadata["station_name"]
+    wide["airport_name"] = metadata["station_name"]
+    wide["city_label"] = metadata["city_label"]
+    wide["timezone"] = timezone
+    wide["country"] = metadata["country"]
+    wide["lat"] = metadata["lat"]
+    wide["lon"] = metadata["lon"]
+    wide["feature_version"] = feature_version
+    wide["timing_mode"] = ASIA_TIMING_MODE
+    provider_frames = {
+        "gfs": _provider_summary(
+            gfs,
+            provider="gfs",
+            temperature_column="temp_c_2m",
+            forecast_hour_column="forecast_hour",
+            as_of_hour=8,
+            dewpoint_column="dewpoint_c_2m",
+            humidity_column="relative_humidity_pct_2m",
+            wind_speed_column="wind_speed_ms_10m",
+            wind_direction_column="wind_direction_deg_10m",
+            wind_gust_column="wind_gust_ms",
+            precipitation_column="precip_mm_1h",
+            cloud_column="cloud_cover_pct",
+        ),
+        "gefs": _gefs_summary(gefs_daily),
+        "jma_msm": _provider_summary(
+            jma,
+            provider="jma_msm",
+            temperature_column="temp_2m_c",
+            forecast_hour_column="forecast_hour_local",
+            as_of_hour=11,
+            dewpoint_column="dewpoint_2m_c",
+            humidity_column="relative_humidity_2m_pct",
+            wind_speed_column="wind_speed_10m_kmh",
+            wind_direction_column="wind_direction_10m_deg",
+            wind_gust_column="wind_gusts_10m_kmh",
+            precipitation_column="precipitation_mm",
+            cloud_column="cloud_cover_pct",
+        ),
+    }
+    for provider in selected:
+        wide = wide.merge(provider_frames[provider], on="contract_date", how="left")
+    wide = _add_calendar_features(wide)
+    wide = _add_current_observation_derived_features(wide)
+    wide = _add_provider_availability_features(wide, selected)
+    wide = _add_provider_time_features(wide, selected, timezone)
+    wide = _add_ensemble_features(wide, selected)
+    wide = _add_forecast_shape_features(wide, selected)
+    wide = _add_provider_cross_model_features(wide, selected)
+    wide = _add_observation_forecast_delta_features(wide, selected)
+
+    issue_key = timing["issue_utc"].strftime("%Y%m%d%H")
+    gfs_source_hours = _available_direct_nwp_fxx_hours(
+        "gfs", timing["issue_utc"], list(GFS_FORECAST_HOURS)
+    )
+    gfs_raw = [
+        root
+        / "raw"
+        / "nwp_subsets"
+        / "gfs"
+        / f"gfs_{field}_{issue_key}_f{hour:03d}.grib2"
+        for hour in gfs_source_hours
+        for field in GFS_FIELDS
+    ]
+    gefs_raw = [
+        root
+        / "raw"
+        / "nwp_subsets"
+        / "gefs"
+        / f"gefs_{member}_temp_2m_c_{issue_key}_f{hour:03d}.grib2"
+        for member in GEFS_MEMBERS
+        for hour in GEFS_TEMP_FORECAST_HOURS
+    ] + [
+        root
+        / "raw"
+        / "nwp_subsets"
+        / "gefs"
+        / f"gefs_{member}_tmax_3h_c_{issue_key}_f{hour:03d}.grib2"
+        for member in GEFS_MEMBERS
+        for hour in GEFS_TMAX_FORECAST_HOURS
+    ]
+    if not all(path.is_file() for path in [*gfs_raw, *gefs_raw]):
+        raise ValueError("source_checksum_missing")
+    wide.attrs["alignment"] = {
+        "alignmentStatus": "aligned",
+        "stationId": station_id,
+        "contractDate": contract_date.isoformat(),
+        "timezone": timezone,
+        "featureCutoffLocal": cutoff_local.isoformat(),
+        "featureCutoffUtc": cutoff_utc.isoformat().replace("+00:00", "Z"),
+        "collectionNotBeforeUtc": not_before_utc.isoformat().replace("+00:00", "Z"),
+        "gfsCycleUtc": timing["issue_utc"].isoformat().replace("+00:00", "Z"),
+        "gefsCycleUtc": timing["issue_utc"].isoformat().replace("+00:00", "Z"),
+        "jmaLineage": "jma_msm_previous_day1",
+        "jmaAvailabilityBasis": "open_meteo_previous_day1_variable",
+        "metarObservedAtUtc": observed_at.isoformat().replace("+00:00", "Z"),
+        "metarSource": "aviation_weather_center_metar",
+        "timingMode": ASIA_TIMING_MODE,
+        "sources": {
+            "gfs": {
+                "retrievedAtUtc": current.isoformat().replace("+00:00", "Z"),
+                "sourceUrls": sorted(set(gfs["source_url"].astype(str))),
+                "sourceChecksum": _composite_sha256(gfs_raw),
+            },
+            "gefs": {
+                "retrievedAtUtc": current.isoformat().replace("+00:00", "Z"),
+                "sourceUrls": sorted(set(gefs["source_url"].astype(str))),
+                "sourceChecksum": _composite_sha256(gefs_raw),
+            },
+            "jma_msm": {
+                "retrievedAtUtc": str(jma.iloc[0]["retrieved_at_utc"]),
+                "sourceUrls": sorted(set(jma["source_url"].astype(str))),
+                "sourceChecksum": str(jma.iloc[0]["source_checksum"]),
+            },
+            "metar": {
+                "retrievedAtUtc": current.isoformat().replace("+00:00", "Z"),
+                "sourceUrls": [str(observed["source_uri"])],
+                "sourceChecksum": str(observed["source_checksum"]),
+            },
+        },
+    }
+    return wide
 
 
 def provider_readiness(data_root: str | Path, city_id: str, providers: tuple[str, ...] = ASIA_PROVIDERS) -> pd.DataFrame:

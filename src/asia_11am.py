@@ -62,7 +62,6 @@ GFS_ARCHIVE = "https://noaa-gfs-bdp-pds.s3.amazonaws.com"
 GEFS_ARCHIVE = "https://noaa-gefs-pds.s3.amazonaws.com"
 _GEFS_CFGRIB_LOCK = Lock()
 JMA_HISTORY_URL = "https://previous-runs-api.open-meteo.com/v1/forecast"
-JMA_LIVE_URL = "https://api.open-meteo.com/v1/jma"
 AWC_METAR_URL = "https://aviationweather.gov/api/data/metar"
 
 # Keep the same deterministic field contract as the established 11AM
@@ -1399,14 +1398,17 @@ def collect_jma_live(
             f"{profile.city_name} live collection starts at "
             f"{profile.as_of_hour_local:02d}:{profile.live_delay_minutes:02d} local"
         )
+    # The promoted Tokyo model was trained on Open-Meteo's fixed lead-time
+    # previous_day1 variables.  The ordinary JMA endpoint is a newer forecast
+    # vintage and must never be substituted into this live row.
     response = _request(
-        JMA_LIVE_URL,
-        params=_jma_params(profile, contract_date, contract_date, historical=False),
+        JMA_HISTORY_URL,
+        params=_jma_params(profile, contract_date, contract_date, historical=True),
         timeout=120,
     )
     content = response.content
     raw_path = _content_addressed_raw_path(
-        data_root / "raw" / "jma_msm_latest_at_collection" / profile.city_id,
+        data_root / "raw" / "jma_msm_previous_day1" / profile.city_id,
         f"{contract_date}_{current:%Y%m%dT%H%M%SZ}",
         content,
         ".json",
@@ -1415,7 +1417,7 @@ def collect_jma_live(
         response.json(),
         profile,
         [contract_date],
-        historical=False,
+        historical=True,
         fetched_at_utc=current,
         source_url=response.url,
         source_checksum=_sha256_bytes(content),
@@ -1424,7 +1426,7 @@ def collect_jma_live(
         data_root
         / "normalized"
         / "live"
-        / "jma_msm_latest_at_collection"
+        / "jma_msm_previous_day1"
         / profile.city_id
         / f"{contract_date}_{current:%Y%m%dT%H%M%SZ}.parquet"
     )
@@ -1432,7 +1434,7 @@ def collect_jma_live(
     return {
         "city_id": profile.city_id,
         "contract_date": contract_date.isoformat(),
-        "lineage": "jma_msm_latest_at_collection",
+        "lineage": "jma_msm_previous_day1",
         "status": "complete" if len(frame) == 13 else "incomplete",
         "row_count": len(frame),
         "raw_path": str(raw_path),
@@ -1484,43 +1486,28 @@ def collect_live_observation(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     current = now or datetime.now(UTC)
-    try:
-        response = _request(
-            AWC_METAR_URL,
-            params={"ids": profile.station_id, "format": "json", "hours": 36},
-            timeout=60,
-        )
-        content = response.content
-        frame = normalize_metar_rows(
-            _awc_rows(response.json()),
-            profile,
-            [contract_date],
-            source_filter="aviation_weather_center_metar",
-            data_source="aviation_weather_center_metar_live",
-        )
-        if frame.empty or not frame["observed_fetch_status"].astype(str).eq("ok").any():
-            raise RuntimeError("AWC did not return a usable pre-11AM METAR")
-        source_name = "aviation_weather_center_metar"
-    except Exception:
-        response = _request(
-            IEM_ASOS_URL,
-            params=_iem_params(profile, contract_date, contract_date),
-            timeout=180,
-        )
-        content = response.content
-        frame = normalize_metar_rows(
-            _iem_rows(content, profile),
-            profile,
-            [contract_date],
-            source_filter="iem_asos_global_metar",
-            data_source="iem_asos_global_metar_live_fallback",
-        )
-        source_name = "iem_asos_global_metar"
+    # Match the production KDAL ML observation path: AWC is the one declared
+    # live distributor.  Keep it single-source so a retry cannot silently mix
+    # IEM and AWC records within the same model contract.
+    response = _request(
+        AWC_METAR_URL,
+        params={"ids": profile.station_id, "format": "json", "hours": 36},
+        timeout=60,
+    )
+    content = response.content
+    frame = normalize_metar_rows(
+        _awc_rows(response.json()),
+        profile,
+        [contract_date],
+        source_filter="aviation_weather_center_metar",
+        data_source="aviation_weather_center_metar_live",
+    )
+    source_name = "aviation_weather_center_metar"
     raw_path = _content_addressed_raw_path(
         data_root / "raw" / "live_observations" / profile.city_id,
         f"{contract_date}_{source_name}",
         content,
-        ".json" if source_name.startswith("aviation") else ".csv",
+        ".json",
     )
     frame["source_uri"] = response.url
     frame["source_checksum"] = _sha256_bytes(content)
@@ -1686,7 +1673,7 @@ def run_live(
         "observations": observations,
         "gfs": gfs,
         "gefs": gefs,
-        "jma_msm_latest_at_collection": jma,
+        "jma_msm_previous_day1": jma,
     }
 
 
