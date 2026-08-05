@@ -87,6 +87,7 @@ def main() -> int:
     manifest.setdefault("model_contract", {})["prediction_temperature_unit"] = PREDICTION_UNIT
     manifest["promotion"] = {
         "immutable_runtime_package": True,
+        "training_source_identity": copy.deepcopy(source_manifest.get("source_identity") or {}),
         "source_bundle_sha256": sha256_file(args.source_bundle),
         "source_manifest_sha256": sha256_file(args.source_manifest),
         "fixed_reference_rows": len(parity),

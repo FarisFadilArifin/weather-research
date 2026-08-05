@@ -17,6 +17,7 @@ TIMING_MODE = "asia_same_day_11am_live_safe"
 PROVIDERS = ("gfs", "gefs", "jma_msm")
 TARGET_SOURCE = "wunderground_only"
 PREDICTION_UNIT = "celsius"
+POINT_IN_TIME_UNSAFE_FEATURES = frozenset({"iem_daily_high_f", "iem_daily_high_c"})
 RUNTIME_CONTRACT_SHA256 = (
     "178006146855e2685d81fb3b9ce40c5475ae8f472aa81ac1335d7a2b493c5f33"
 )
@@ -85,6 +86,13 @@ def validate_contract(bundle: dict[str, Any], manifest: dict[str, Any]) -> None:
         raise ValueError("bundle_missing_models_or_features")
     if bundle.get("stack_model") is None:
         raise ValueError("bundle_missing_stack_model")
+    bundle_features = list(bundle["feature_names"])
+    manifest_features = list((manifest.get("features") or {}).get("all") or [])
+    if bundle_features != manifest_features:
+        raise ValueError("bundle_manifest_feature_order_mismatch")
+    leaked = sorted(POINT_IN_TIME_UNSAFE_FEATURES.intersection(bundle_features))
+    if leaked:
+        raise ValueError("point_in_time_unsafe_features:" + ",".join(leaked))
 
 
 def predict_high_f(bundle: dict[str, Any], row: Any) -> float:
