@@ -60,7 +60,10 @@ class WeatherCompanyStationHistoryClient:
             },
             timeout=self.timeout_seconds,
         )
-        response.raise_for_status()
+        if not response.ok:
+            raise RuntimeError(
+                f"Weather Company station history returned HTTP {response.status_code}"
+            )
         payload = response.json()
         observations = payload.get("observations", []) if isinstance(payload, dict) else []
         return [item for item in observations if isinstance(item, dict)]
