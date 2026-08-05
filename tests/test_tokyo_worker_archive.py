@@ -28,6 +28,8 @@ def test_worker_archive_is_relative_manifested_and_free_of_retired_identifiers(t
         assert all(not Path(name).is_absolute() and ".." not in Path(name).parts for name in names)
         assert "src/polymarket_parse.py" not in names
         assert "src/settlement_actuals.py" not in names
+        assert "src/wunderground_history.py" in names
+        assert "scripts/run_asia_11am_pull.py" in names
         manifest = json.load(archive.extractfile("WORKER-MANIFEST.json"))
         assert manifest["sourceCommit"] == "a" * 40
         for member in archive.getmembers():

@@ -314,9 +314,7 @@ def run_settlement_backfill(
     api_key: str | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    # Historical settlement acquisition is not part of the live Tokyo worker. Keep this
-    # dependency lazy so the immutable worker package contains only live-safe weather inputs.
-    from .settlement_actuals import backfill_wunderground_station_history
+    from .wunderground_history import backfill_wunderground_station_history
 
     output = data_root / "normalized" / "settlements" / "settlement_actual_highs.csv"
     frame = backfill_wunderground_station_history(

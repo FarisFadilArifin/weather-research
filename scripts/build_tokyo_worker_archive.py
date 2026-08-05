@@ -11,11 +11,13 @@ from pathlib import Path, PurePosixPath
 
 RUNTIME_FILES = (
     "requirements.txt",
+    "scripts/run_asia_11am_pull.py",
     "scripts/publish_tokyo_live_feature_artifact.py",
     "src/__init__.py",
     "src/asia_11am.py",
     "src/current_observations.py",
     "src/direct_nwp_fetch.py",
+    "src/wunderground_history.py",
     "src/calibration/__init__.py",
     "src/calibration/asia_station_stacking.py",
     "src/calibration/data_quality.py",
