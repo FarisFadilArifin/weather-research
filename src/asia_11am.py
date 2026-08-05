@@ -35,10 +35,6 @@ from .direct_nwp_fetch import (
     direct_nwp_file_url,
     extract_direct_nwp_run_feature_points,
 )
-from .settlement_actuals import (
-    WeatherCompanyStationHistoryClient,
-    backfill_wunderground_station_history,
-)
 
 
 DEFAULT_DATA_ROOT = Path("data/calibration/asia_11am")
@@ -319,6 +315,10 @@ def run_settlement_backfill(
     api_key: str | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
+    # Historical settlement acquisition is not part of the live Tokyo worker. Keep this
+    # dependency lazy so the immutable worker package contains only live-safe weather inputs.
+    from .settlement_actuals import backfill_wunderground_station_history
+
     output = data_root / "normalized" / "settlements" / "settlement_actual_highs.csv"
     frame = backfill_wunderground_station_history(
         output,
