@@ -26,7 +26,13 @@ def feature_frame() -> pd.DataFrame:
         actual_high_f=99.0,
         optional_missing=float("nan"),
     )
-    return pd.DataFrame([row])
+    frame = pd.DataFrame([row])
+    frame.attrs["alignment"] = {
+        "alignmentStatus": "aligned",
+        "stationId": "RJTT",
+        "contractDate": "2026-08-06",
+    }
+    return frame
 
 
 def test_payload_is_target_free_and_publishes_verified_sidecar(tmp_path):
@@ -42,6 +48,7 @@ def test_payload_is_target_free_and_publishes_verified_sidecar(tmp_path):
     raw = artifact.read_bytes()
     assert sidecar.read_text().split()[0] == hashlib.sha256(raw).hexdigest()
     assert json.loads(raw)["providers"] == ["gfs", "gefs", "jma_msm"]
+    assert json.loads(raw)["alignmentStatus"] == "aligned"
 
 
 def test_payload_rejects_missing_provider_and_stale_observation():
