@@ -47,3 +47,18 @@ def test_tokyo_metric_history_is_converted_and_written_atomically(tmp_path, monk
     assert ":9:JP/" in row["source_url"]
     assert "apiKey" not in row["source_url"]
     assert output.is_file()
+
+
+def test_station_history_http_error_does_not_expose_api_key(monkeypatch):
+    class Response:
+        ok = False
+        status_code = 403
+        url = "https://example.test/history?apiKey=do-not-print"
+
+    monkeypatch.setattr(module.requests, "get", lambda *args, **kwargs: Response())
+    client = module.WeatherCompanyStationHistoryClient(api_key="do-not-print")
+    with pytest.raises(RuntimeError, match="HTTP 403") as caught:
+        client.fetch_observations(
+            "RJTT", "2026-08-01", "2026-08-01", country="JP", units="m"
+        )
+    assert "do-not-print" not in str(caught.value)
