@@ -9,6 +9,7 @@ import src.asia_11am as asia_11am
 from src.asia_11am import (
     CITY_PROFILES,
     GEFS_MEMBERS,
+    JMA_REQUIRED_LIVE_FIELDS,
     _gfs_rows,
     _jma_output_column,
     audit_pipeline,
@@ -113,6 +114,7 @@ def test_jma_previous_day1_normalization_keeps_only_11_to_23_local() -> None:
     assert frame["lineage"].eq("jma_msm_previous_day1").all()
     assert frame["valid_time_local"].str[11:13].astype(int).between(11, 23).all()
     assert _jma_output_column("temperature_2m") == "temp_2m_c"
+    assert "wind_gusts_10m" not in JMA_REQUIRED_LIVE_FIELDS
 
 
 def test_gfs_rows_use_celsius_and_expected_issue() -> None:

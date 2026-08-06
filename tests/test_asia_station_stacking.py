@@ -8,9 +8,32 @@ import pandas as pd
 
 from src.calibration.asia_station_stacking import (
     ASIA_PROVIDERS,
+    _jma_live_frame_is_complete,
     asia_expanding_folds,
     build_asia_station_wide_dataset,
 )
+from src.asia_11am import JMA_REQUIRED_LIVE_FIELDS, _jma_output_column
+
+
+def test_jma_live_validation_allows_undefined_open_meteo_gusts() -> None:
+    rows = []
+    for hour in range(11, 24):
+        row = {
+            "forecast_hour_local": hour,
+            "lineage": "jma_msm_previous_day1",
+            "availability_basis": "open_meteo_previous_day1_variable",
+            "fetch_status": "ok",
+            "wind_gusts_10m_kmh": None,
+        }
+        for field in JMA_REQUIRED_LIVE_FIELDS:
+            row[_jma_output_column(field)] = 1.0
+        rows.append(row)
+    frame = pd.DataFrame(rows)
+    required_columns = tuple(_jma_output_column(field) for field in JMA_REQUIRED_LIVE_FIELDS)
+
+    assert _jma_live_frame_is_complete(frame, required_columns)
+    frame.loc[0, "temp_2m_c"] = None
+    assert not _jma_live_frame_is_complete(frame, required_columns)
 from src.calibration.station_stacking import (
     POINT_IN_TIME_UNSAFE_FEATURE_COLUMNS,
     StationStackingConfig,

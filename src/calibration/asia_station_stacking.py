@@ -354,6 +354,31 @@ def _finite_columns(frame: pd.DataFrame, columns: tuple[str, ...]) -> bool:
     )
 
 
+def _jma_live_frame_is_complete(
+    frame: pd.DataFrame, required_value_columns: tuple[str, ...]
+) -> bool:
+    """Validate the point-in-time-safe JMA fields needed for live inference."""
+    hours = set(
+        pd.to_numeric(frame.get("forecast_hour_local"), errors="coerce")
+        .dropna()
+        .astype(int)
+    )
+    return (
+        len(frame) == 13
+        and hours == set(range(11, 24))
+        and frame.get("lineage", pd.Series(dtype=str))
+        .astype(str)
+        .eq("jma_msm_previous_day1")
+        .all()
+        and frame.get("availability_basis", pd.Series(dtype=str))
+        .astype(str)
+        .eq("open_meteo_previous_day1_variable")
+        .all()
+        and frame.get("fetch_status", pd.Series(dtype=str)).astype(str).eq("ok").all()
+        and _finite_columns(frame, required_value_columns)
+    )
+
+
 def build_asia_live_feature_row(
     data_root: str | Path,
     city_id: str,
@@ -370,7 +395,7 @@ def build_asia_live_feature_row(
         GEFS_TMAX_FORECAST_HOURS,
         GFS_FIELDS,
         GFS_FORECAST_HOURS,
-        JMA_BASE_FIELDS,
+        JMA_REQUIRED_LIVE_FIELDS,
         _jma_output_column,
         forecast_timing,
         summarize_gefs_members,
@@ -485,18 +510,10 @@ def build_asia_live_feature_row(
         contract_date,
     )
     jma = pd.read_parquet(jma_path)
-    jma_hours = set(pd.to_numeric(jma.get("forecast_hour_local"), errors="coerce").dropna().astype(int))
-    jma_columns = tuple(_jma_output_column(field) for field in JMA_BASE_FIELDS)
-    if (
-        len(jma) != 13
-        or jma_hours != set(range(11, 24))
-        or not jma.get("lineage", pd.Series(dtype=str)).astype(str).eq("jma_msm_previous_day1").all()
-        or not jma.get("availability_basis", pd.Series(dtype=str)).astype(str).eq(
-            "open_meteo_previous_day1_variable"
-        ).all()
-        or not jma.get("fetch_status", pd.Series(dtype=str)).astype(str).eq("ok").all()
-        or not _finite_columns(jma, jma_columns)
-    ):
+    jma_required_columns = tuple(
+        _jma_output_column(field) for field in JMA_REQUIRED_LIVE_FIELDS
+    )
+    if not _jma_live_frame_is_complete(jma, jma_required_columns):
         raise ValueError("jma_wrong_lineage_or_incomplete_hours")
     if not jma.get("source_url", pd.Series(dtype=str)).astype(str).str.len().gt(0).all() or not jma.get(
         "source_checksum", pd.Series(dtype=str)

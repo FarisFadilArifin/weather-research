@@ -88,6 +88,14 @@ JMA_BASE_FIELDS = (
     "wind_gusts_10m",
 )
 
+# Open-Meteo exposes the JMA MSM previous-day values used by the live Tokyo
+# contract, but currently reports the gust variable as ``undefined``.  Keep
+# requesting and normalizing it so the feature schema remains stable, while
+# requiring only the variables that this endpoint actually supplies.
+JMA_REQUIRED_LIVE_FIELDS = tuple(
+    field for field in JMA_BASE_FIELDS if field != "wind_gusts_10m"
+)
+
 
 @dataclass(frozen=True)
 class AsiaCityProfile:
