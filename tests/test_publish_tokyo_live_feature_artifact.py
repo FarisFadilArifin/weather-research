@@ -219,9 +219,19 @@ def write_worker_archive_root(tmp_path: Path, commit: str = "a" * 40) -> dict[st
 
 def test_source_identity_requires_complete_matching_worker_archive_manifest(tmp_path):
     write_worker_archive_root(tmp_path)
-    identity = MODULE.source_identity(tmp_path, source_commit="a" * 40)
+    identity = MODULE.source_identity(
+        tmp_path, source_commit="a" * 40, worker_archive_sha256="b" * 64
+    )
     assert identity["cleanCommit"] == "a" * 40
+    assert identity["workerArchiveSha256"] == "b" * 64
     assert len(identity["workerArchiveManifestSha256"]) == 64
+
+
+def test_source_identity_requires_pinned_worker_archive_hash(tmp_path, monkeypatch):
+    write_worker_archive_root(tmp_path)
+    monkeypatch.delenv("WEATHER_RESEARCH_WORKER_ARCHIVE_SHA256", raising=False)
+    with pytest.raises(ValueError, match="worker_archive_sha256_missing_or_invalid"):
+        MODULE.source_identity(tmp_path, source_commit="a" * 40)
 
 
 @pytest.mark.parametrize(
@@ -249,7 +259,9 @@ def test_source_identity_rejects_mutated_runtime_payloads(
         else:
             handle.write(b"mutated")
     with pytest.raises(ValueError, match=error):
-        MODULE.source_identity(tmp_path, source_commit="a" * 40)
+        MODULE.source_identity(
+            tmp_path, source_commit="a" * 40, worker_archive_sha256="b" * 64
+        )
 
 
 @pytest.mark.parametrize(
@@ -274,4 +286,6 @@ def test_source_identity_rejects_missing_extra_and_unsafe_manifest_entries(
         files["../outside.py"] = {"sha256": "a" * 64, "size": 0}
     (tmp_path / "WORKER-MANIFEST.json").write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match=error):
-        MODULE.source_identity(tmp_path, source_commit="a" * 40)
+        MODULE.source_identity(
+            tmp_path, source_commit="a" * 40, worker_archive_sha256="b" * 64
+        )

@@ -146,12 +146,26 @@ def load_provider_contract(project_root: Path) -> dict[str, Any]:
     return contract
 
 
-def source_identity(project_root: Path, *, source_commit: str) -> dict[str, str]:
+def source_identity(
+    project_root: Path,
+    *,
+    source_commit: str,
+    worker_archive_sha256: str | None = None,
+) -> dict[str, str]:
     """Read the immutable worker manifest shipped with an archive release.
 
     The manifest is deliberately inside the archive and has a checksum in the
     payload; it names the clean commit without attempting to hash itself.
     """
+    archive_sha256 = (
+        worker_archive_sha256
+        if worker_archive_sha256 is not None
+        else os.environ.get("WEATHER_RESEARCH_WORKER_ARCHIVE_SHA256", "")
+    ).strip().lower()
+    if len(archive_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in archive_sha256
+    ):
+        raise ValueError("worker_archive_sha256_missing_or_invalid")
     manifest_path = project_root / "WORKER-MANIFEST.json"
     if not manifest_path.is_file():
         raise ValueError("missing_worker_archive_manifest")
@@ -206,6 +220,7 @@ def source_identity(project_root: Path, *, source_commit: str) -> dict[str, str]
         raise ValueError("worker_archive_source_commit_payload_mismatch")
     return {
         "cleanCommit": source_commit,
+        "workerArchiveSha256": archive_sha256,
         "workerArchiveManifestSha256": hashlib.sha256(raw).hexdigest(),
         "workerArchiveArtifactType": str(manifest["artifactType"]),
     }
