@@ -148,6 +148,50 @@ def source_identity(project_root: Path, *, source_commit: str) -> dict[str, str]
     }
 
 
+def validate_alignment(
+    alignment: dict[str, Any], contract_date: date, *, runtime_provider: str
+) -> None:
+    """Require the IEM-backed, point-in-time alignment schema before publish."""
+    expected = {
+        "alignmentStatus": "aligned",
+        "stationId": "RJTT",
+        "contractDate": contract_date.isoformat(),
+        "timezone": "Asia/Tokyo",
+        "jmaLineage": "jma_msm_previous_day1",
+        "jmaAvailabilityBasis": "open_meteo_previous_day1_variable",
+        "metarSource": runtime_provider,
+        "timingMode": TIMING_MODE,
+    }
+    for field, value in expected.items():
+        if alignment.get(field) != value:
+            raise ValueError(f"alignment_{field}_mismatch")
+    for field in (
+        "featureCutoffLocal",
+        "featureCutoffUtc",
+        "collectionNotBeforeUtc",
+        "gfsCycleUtc",
+        "gefsCycleUtc",
+        "metarObservedAtUtc",
+    ):
+        if not isinstance(alignment.get(field), str) or not alignment[field].strip():
+            raise ValueError(f"alignment_{field}_missing")
+    sources = alignment.get("sources")
+    if not isinstance(sources, dict):
+        raise ValueError("alignment_sources_missing")
+    for name in ("gfs", "gefs", "jma_msm", "metar"):
+        source = sources.get(name)
+        if not isinstance(source, dict):
+            raise ValueError(f"alignment_{name}_source_missing")
+        urls = source.get("sourceUrls")
+        checksum = str(source.get("sourceChecksum") or "")
+        if not isinstance(urls, list) or not urls or not all(str(url).strip() for url in urls):
+            raise ValueError(f"alignment_{name}_source_url_missing")
+        if len(checksum) != 64 or any(
+            character not in "0123456789abcdef" for character in checksum.lower()
+        ):
+            raise ValueError(f"alignment_{name}_source_checksum_missing")
+
+
 def build_payload(
     frame: pd.DataFrame,
     contract_date: date,
@@ -158,8 +202,10 @@ def build_payload(
     archive_identity: dict[str, str],
 ) -> dict[str, Any]:
     alignment = frame.attrs.get("alignment")
-    if not isinstance(alignment, dict) or alignment.get("alignmentStatus") != "aligned":
+    if not isinstance(alignment, dict):
         raise ValueError("alignment_status_not_aligned")
+    runtime_provider = str(provider_contract["runtimeProvider"])
+    validate_alignment(alignment, contract_date, runtime_provider=runtime_provider)
     selected = frame.loc[
         frame["contract_date"].astype(str).eq(contract_date.isoformat())
     ]
@@ -187,7 +233,6 @@ def build_payload(
     ]
     if missing_text:
         raise ValueError("missing_required_live_features:" + ",".join(missing_text))
-    runtime_provider = str(provider_contract["runtimeProvider"])
     if inputs.get("observed_source") != runtime_provider:
         raise ValueError("live_observation_source_contract_mismatch")
     if inputs.get("observed_data_source") != f"{runtime_provider}_live":

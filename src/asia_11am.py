@@ -1493,42 +1493,6 @@ def collect_jma_live(
     }
 
 
-def _awc_rows(payload: Any) -> list[dict[str, Any]]:
-    records = payload if isinstance(payload, list) else []
-    rows: list[dict[str, Any]] = []
-    for item in records:
-        if not isinstance(item, Mapping):
-            continue
-        temp_c = _number(item.get("temp"))
-        dewpoint_c = _number(item.get("dewp"))
-        altimeter_hpa = _number(item.get("altim"))
-        clouds = item.get("clouds") if isinstance(item.get("clouds"), list) else []
-        row: dict[str, Any] = {
-            "observed_at": item.get("reportTime")
-            or datetime.fromtimestamp(float(item["obsTime"]), tz=UTC).isoformat(),
-            "temp_f": _c_to_f(temp_c),
-            "dewpoint_f": _c_to_f(dewpoint_c),
-            "wind_dir_degrees": item.get("wdir"),
-            "wind_speed_kt": item.get("wspd"),
-            "wind_gust_kt": item.get("wgst"),
-            "altimeter_inhg": (
-                float(altimeter_hpa) / 33.8638866667
-                if pd.notna(altimeter_hpa)
-                else pd.NA
-            ),
-            "visibility_miles": _number(item.get("visib")),
-            "raw_metar": item.get("rawOb"),
-            "source": "aviation_weather_center_metar",
-            "observation_type": item.get("metarType", "METAR"),
-            "qc_field": item.get("qcField"),
-        }
-        for index, cloud in enumerate(clouds[:4], start=1):
-            row[f"sky_cover_{index}"] = cloud.get("cover")
-            row[f"sky_base_{index}_ft"] = cloud.get("base")
-        rows.append(row)
-    return rows
-
-
 def collect_live_observation(
     data_root: Path,
     profile: AsiaCityProfile,
@@ -1538,7 +1502,7 @@ def collect_live_observation(
 ) -> dict[str, Any]:
     current = now or datetime.now(UTC)
     # Tokyo training uses IEM ASOS/METAR. Live collection intentionally uses
-    # that same station/population contract; do not relabel AWC as equivalent.
+    # that same station/population contract; do not relabel another feed as equivalent.
     response = _request(
         IEM_ASOS_URL,
         params=_iem_params(profile, contract_date, contract_date),

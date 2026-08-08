@@ -379,6 +379,57 @@ def _jma_live_frame_is_complete(
     )
 
 
+IEM_ASOS_METAR_PROVIDER = "iem_asos_global_metar"
+IEM_ASOS_METAR_LIVE_DATA_SOURCE = f"{IEM_ASOS_METAR_PROVIDER}_live"
+IEM_REQUIRED_LIVE_OBSERVATION_FIELDS = (
+    "observed_temp_at_as_of_f",
+    "observed_high_temp_through_as_of_f",
+    "observed_humidity_at_as_of",
+    "observed_precip_recent_at_as_of",
+    "observed_visibility_at_as_of",
+)
+
+
+def _validate_live_iem_observation(
+    observation: pd.DataFrame,
+    *,
+    station_id: str,
+    cutoff_utc: datetime,
+) -> tuple[pd.Series, pd.Timestamp]:
+    """Validate the same IEM RJTT METAR population used by Tokyo training."""
+    if len(observation) != 1:
+        raise ValueError("metar_row_count")
+    observed = observation.iloc[0]
+    if str(observed.get("station_id") or "").upper() != station_id:
+        raise ValueError("metar_station_mismatch")
+    if str(observed.get("observed_source") or "") != IEM_ASOS_METAR_PROVIDER:
+        raise ValueError("metar_source_mismatch")
+    if str(observed.get("observed_data_source") or "") != IEM_ASOS_METAR_LIVE_DATA_SOURCE:
+        raise ValueError("metar_data_source_mismatch")
+    if str(observed.get("observed_fetch_status") or "") != "ok":
+        raise ValueError("metar_unavailable")
+    observed_at = pd.to_datetime(observed.get("observed_as_of_time_local"), utc=True)
+    if pd.isna(observed_at):
+        raise ValueError("metar_observation_timestamp_invalid")
+    age_minutes = (pd.Timestamp(cutoff_utc) - observed_at).total_seconds() / 60.0
+    if observed_at > pd.Timestamp(cutoff_utc):
+        raise ValueError("metar_post_cutoff")
+    if age_minutes < 0 or age_minutes > 60:
+        raise ValueError("metar_too_old")
+    if not _finite_columns(observation, IEM_REQUIRED_LIVE_OBSERVATION_FIELDS):
+        raise ValueError("metar_required_value_missing")
+    if not str(observed.get("observed_weather_code_at_as_of") or "").strip():
+        raise ValueError("metar_weather_code_missing")
+    if not str(observed.get("source_uri") or "") or not str(observed.get("source_checksum") or "").lower().strip():
+        raise ValueError("source_checksum_missing")
+    source_checksum = str(observed.get("source_checksum") or "").strip()
+    if len(source_checksum) != 64 or any(
+        character not in "0123456789abcdef" for character in source_checksum.lower()
+    ):
+        raise ValueError("source_checksum_missing")
+    return observed, observed_at
+
+
 def build_asia_live_feature_row(
     data_root: str | Path,
     city_id: str,
@@ -424,28 +475,11 @@ def build_asia_live_feature_row(
         root / "normalized" / "live" / "observations" / city, contract_date
     )
     observation = pd.read_parquet(observation_path)
-    if len(observation) != 1:
-        raise ValueError("metar_row_count")
-    observed = observation.iloc[0]
-    if str(observed.get("station_id") or "").upper() != station_id:
-        raise ValueError("metar_station_mismatch")
-    if str(observed.get("observed_source") or "") != "aviation_weather_center_metar":
-        raise ValueError("metar_source_mismatch")
-    if str(observed.get("observed_fetch_status") or "") != "ok":
-        raise ValueError("metar_unavailable")
-    observed_at = pd.to_datetime(observed.get("observed_as_of_time_local"), utc=True)
-    age_minutes = (pd.Timestamp(cutoff_utc) - observed_at).total_seconds() / 60.0
-    if observed_at > pd.Timestamp(cutoff_utc):
-        raise ValueError("metar_post_cutoff")
-    if age_minutes < 0 or age_minutes > 60:
-        raise ValueError("metar_too_old")
-    if not _finite_columns(
+    observed, observed_at = _validate_live_iem_observation(
         observation,
-        ("observed_temp_at_as_of_f", "observed_high_temp_through_as_of_f"),
-    ):
-        raise ValueError("metar_required_value_missing")
-    if not str(observed.get("source_uri") or "") or not str(observed.get("source_checksum") or ""):
-        raise ValueError("source_checksum_missing")
+        station_id=station_id,
+        cutoff_utc=cutoff_utc,
+    )
 
     gfs_path = (
         root / "normalized" / "forecasts" / "gfs" / city
@@ -617,7 +651,7 @@ def build_asia_live_feature_row(
         "jmaLineage": "jma_msm_previous_day1",
         "jmaAvailabilityBasis": "open_meteo_previous_day1_variable",
         "metarObservedAtUtc": observed_at.isoformat().replace("+00:00", "Z"),
-        "metarSource": "aviation_weather_center_metar",
+        "metarSource": IEM_ASOS_METAR_PROVIDER,
         "timingMode": ASIA_TIMING_MODE,
         "sources": {
             "gfs": {

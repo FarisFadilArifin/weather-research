@@ -30,10 +30,27 @@ def feature_frame() -> pd.DataFrame:
         optional_missing=float("nan"),
     )
     frame = pd.DataFrame([row])
+    source = {
+        "retrievedAtUtc": "2026-08-06T02:10:00Z",
+        "sourceUrls": ["https://example.test/source"],
+        "sourceChecksum": "c" * 64,
+    }
     frame.attrs["alignment"] = {
         "alignmentStatus": "aligned",
         "stationId": "RJTT",
         "contractDate": "2026-08-06",
+        "timezone": "Asia/Tokyo",
+        "featureCutoffLocal": "2026-08-06T11:00:00+09:00",
+        "featureCutoffUtc": "2026-08-06T02:00:00Z",
+        "collectionNotBeforeUtc": "2026-08-06T02:10:00Z",
+        "gfsCycleUtc": "2026-08-05T18:00:00Z",
+        "gefsCycleUtc": "2026-08-05T18:00:00Z",
+        "jmaLineage": "jma_msm_previous_day1",
+        "jmaAvailabilityBasis": "open_meteo_previous_day1_variable",
+        "metarObservedAtUtc": "2026-08-06T02:00:00Z",
+        "metarSource": "iem_asos_global_metar",
+        "timingMode": "asia_same_day_11am_live_safe",
+        "sources": {name: dict(source) for name in ("gfs", "gefs", "jma_msm", "metar")},
     }
     return frame
 
@@ -128,6 +145,18 @@ def test_payload_rejects_non_iem_source_and_missing_weather_code():
     frame = feature_frame()
     frame.loc[0, "observed_source"] = "aviation_weather_center_metar"
     with pytest.raises(ValueError, match="source_contract_mismatch"):
+        MODULE.build_payload(
+            frame,
+            date(2026, 8, 6),
+            source_commit="a" * 40,
+            generated_at=datetime.now(UTC),
+            provider_contract=provider_contract(),
+            archive_identity=archive_identity(),
+        )
+
+    frame = feature_frame()
+    frame.attrs["alignment"]["metarSource"] = "aviation_weather_center_metar"
+    with pytest.raises(ValueError, match="alignment_metarSource_mismatch"):
         MODULE.build_payload(
             frame,
             date(2026, 8, 6),
