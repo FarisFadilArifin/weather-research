@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import shutil
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -22,7 +23,9 @@ def feature_frame() -> pd.DataFrame:
     row.update(
         contract_date="2026-08-06",
         observed_as_of_time_local="2026-08-06T11:00:00+09:00",
-        observed_source="rjtt_metar",
+        observed_source="iem_asos_global_metar",
+        observed_data_source="iem_asos_global_metar_live",
+        observed_weather_code_at_as_of="-RA",
         actual_high_f=99.0,
         optional_missing=float("nan"),
     )
@@ -35,20 +38,65 @@ def feature_frame() -> pd.DataFrame:
     return frame
 
 
-def test_payload_is_target_free_and_publishes_verified_sidecar(tmp_path):
+def provider_contract() -> dict[str, object]:
+    return {
+        "contractId": "rjtt_iem_asos_metar_training_population_v1",
+        "trainingProvider": "iem_asos_global_metar",
+        "runtimeProvider": "iem_asos_global_metar",
+        "population": "RJTT METAR observations at or before 11:00 Asia/Tokyo",
+        "requiredRuntimeFields": [
+            "observed_humidity_at_as_of",
+            "observed_precip_recent_at_as_of",
+            "observed_visibility_at_as_of",
+            "observed_weather_code_at_as_of",
+        ],
+        "weatherCodePolicy": {
+            "sourceField": "IEM wxcodes",
+            "clearWeatherSentinel": "NONE",
+        },
+    }
+
+
+def archive_identity(commit: str = "a" * 40) -> dict[str, str]:
+    return {
+        "cleanCommit": commit,
+        "workerArchiveManifestSha256": "b" * 64,
+        "workerArchiveArtifactType": "weather_research_tokyo_worker_v1",
+    }
+
+
+def test_payload_is_target_free_and_publishes_verified_sidecar(tmp_path, monkeypatch):
     payload = MODULE.build_payload(
         feature_frame(),
         date(2026, 8, 6),
         source_commit="a" * 40,
         generated_at=datetime(2026, 8, 6, 2, 10, tzinfo=UTC),
+        provider_contract=provider_contract(),
+        archive_identity=archive_identity(),
     )
     assert "actual_high_f" not in payload["featureInputs"]
     assert payload["featureInputs"]["optional_missing"] is None
+    symlink_calls: list[tuple[Path, Path]] = []
+
+    def fake_symlink(target, link, *, target_is_directory):
+        symlink_calls.append((Path(target), Path(link)))
+        link.mkdir()
+        for child in (tmp_path / target).iterdir():
+            shutil.copy2(child, link / child.name)
+
+    # CI Windows workers can lack the privilege to create a directory symlink.
+    # The production code still calls os.symlink and deliberately has no copy
+    # fallback; this fixture only models the completed current target.
+    monkeypatch.setattr(MODULE.os, "symlink", fake_symlink)
     artifact, sidecar = MODULE.publish(payload, tmp_path)
     raw = artifact.read_bytes()
     assert sidecar.read_text().split()[0] == hashlib.sha256(raw).hexdigest()
     assert json.loads(raw)["providers"] == ["gfs", "gefs", "jma_msm"]
     assert json.loads(raw)["alignmentStatus"] == "aligned"
+    assert artifact.parent.name == "current"
+    assert symlink_calls[0][0].parts[0] == "releases"
+    assert json.loads(raw)["providerContract"]["runtimeProvider"] == "iem_asos_global_metar"
+    assert not list((tmp_path / "releases").glob(".stage-*"))
 
 
 def test_payload_rejects_missing_provider_and_stale_observation():
@@ -60,6 +108,8 @@ def test_payload_rejects_missing_provider_and_stale_observation():
             date(2026, 8, 6),
             source_commit="a" * 40,
             generated_at=datetime.now(UTC),
+            provider_contract=provider_contract(),
+            archive_identity=archive_identity(),
         )
     frame = feature_frame()
     frame.loc[0, "observed_as_of_time_local"] = "2026-08-06T10:39:00+09:00"
@@ -69,6 +119,40 @@ def test_payload_rejects_missing_provider_and_stale_observation():
             date(2026, 8, 6),
             source_commit="a" * 40,
             generated_at=datetime.now(UTC),
+            provider_contract=provider_contract(),
+            archive_identity=archive_identity(),
+        )
+
+
+def test_payload_rejects_non_iem_source_and_missing_weather_code():
+    frame = feature_frame()
+    frame.loc[0, "observed_source"] = "aviation_weather_center_metar"
+    with pytest.raises(ValueError, match="source_contract_mismatch"):
+        MODULE.build_payload(
+            frame,
+            date(2026, 8, 6),
+            source_commit="a" * 40,
+            generated_at=datetime.now(UTC),
+            provider_contract=provider_contract(),
+            archive_identity=archive_identity(),
+        )
+
+
+def test_checked_in_contract_declares_source_truthful_clear_weather_policy():
+    contract = MODULE.load_provider_contract(Path(__file__).resolve().parents[1])
+    assert contract["trainingProvider"] == contract["runtimeProvider"] == "iem_asos_global_metar"
+    assert contract["weatherCodePolicy"]["clearWeatherSentinel"] == "NONE"
+    assert "never supplies precipitation" in contract["weatherCodePolicy"]["measurementRule"]
+    frame = feature_frame()
+    frame.loc[0, "observed_weather_code_at_as_of"] = ""
+    with pytest.raises(ValueError, match="observed_weather_code_at_as_of"):
+        MODULE.build_payload(
+            frame,
+            date(2026, 8, 6),
+            source_commit="a" * 40,
+            generated_at=datetime.now(UTC),
+            provider_contract=provider_contract(),
+            archive_identity=archive_identity(),
         )
 
 
@@ -79,3 +163,27 @@ def test_source_commit_can_be_declared_for_archive_deployments(tmp_path, monkeyp
     monkeypatch.delenv("WEATHER_RESEARCH_SOURCE_COMMIT")
     (tmp_path / ".source-commit").write_text("c" * 40 + "\n", encoding="utf-8")
     assert MODULE.git_commit(tmp_path) == "c" * 40
+
+
+def test_source_identity_requires_matching_worker_archive_manifest(tmp_path):
+    files = {
+        "scripts/publish_tokyo_live_feature_artifact.py": b"publisher",
+        "src/asia_11am.py": b"collector",
+        "config/tokyo_iem_asos_observation_contract.json": b"contract",
+    }
+    for name, raw in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+    manifest = {
+        "artifactType": "weather_research_tokyo_worker_v1",
+        "sourceCommit": "a" * 40,
+        "files": {
+            name: {"sha256": hashlib.sha256(raw).hexdigest()}
+            for name, raw in files.items()
+        },
+    }
+    (tmp_path / "WORKER-MANIFEST.json").write_text(json.dumps(manifest), encoding="utf-8")
+    identity = MODULE.source_identity(tmp_path, source_commit="a" * 40)
+    assert identity["cleanCommit"] == "a" * 40
+    assert len(identity["workerArchiveManifestSha256"]) == 64

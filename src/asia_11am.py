@@ -63,6 +63,11 @@ GEFS_ARCHIVE = "https://noaa-gefs-pds.s3.amazonaws.com"
 _GEFS_CFGRIB_LOCK = Lock()
 JMA_HISTORY_URL = "https://previous-runs-api.open-meteo.com/v1/forecast"
 AWC_METAR_URL = "https://aviationweather.gov/api/data/metar"
+IEM_CLEAR_WEATHER_SENTINEL = "NONE"
+_METAR_PRESENT_WEATHER_TOKEN = re.compile(
+    r"^(?:[+-]|VC)?(?:MI|BC|PR|DR|BL|SH|TS|FZ)?"
+    r"(?:DZ|RA|SN|SG|IC|PL|GR|GS|UP|BR|FG|FU|VA|DU|SA|HZ|PO|SQ|FC|SS|DS)+$"
+)
 
 # Keep the same deterministic field contract as the established 11AM
 # pipeline. Additional direct-NWP variables remain available through
@@ -325,8 +330,38 @@ def _iem_params(
     return params
 
 
+def _iem_weather_code(
+    value: Any,
+    *,
+    raw_metar: Any,
+    has_wxcodes_field: bool,
+    profile: AsiaCityProfile,
+) -> str | Any:
+    """Keep IEM's present-weather field source-truthful.
+
+    IEM publishes an empty ``wxcodes`` cell for a reported METAR with no
+    present-weather group.  That is distinct from a missing field or a raw
+    report whose weather group disagrees with the blank cell.  Only the former
+    becomes the explicit categorical ``NONE`` sentinel; it never supplies a
+    precipitation amount or another measurement.
+    """
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    raw = raw_metar.strip() if isinstance(raw_metar, str) else ""
+    tokens = raw.split()
+    valid_station_report = (
+        profile.station_id in tokens
+        and any(re.fullmatch(r"\d{6}Z", token) for token in tokens)
+    )
+    raw_has_weather = any(_METAR_PRESENT_WEATHER_TOKEN.fullmatch(token) for token in tokens)
+    if has_wxcodes_field and valid_station_report and not raw_has_weather:
+        return IEM_CLEAR_WEATHER_SENTINEL
+    return pd.NA
+
+
 def _iem_rows(content: bytes, profile: AsiaCityProfile) -> list[dict[str, Any]]:
     frame = pd.read_csv(io.BytesIO(content), na_values=["null", "M", ""], low_memory=False)
+    has_wxcodes_field = "wxcodes" in frame.columns
     rows: list[dict[str, Any]] = []
     for item in frame.to_dict(orient="records"):
         valid = pd.to_datetime(item.get("valid"), errors="coerce")
@@ -334,6 +369,7 @@ def _iem_rows(content: bytes, profile: AsiaCityProfile) -> list[dict[str, Any]]:
             continue
         if valid.tzinfo is None:
             valid = valid.tz_localize(profile.timezone)
+        raw_metar = item.get("metar")
         rows.append(
             {
                 "observed_at": valid.tz_convert(UTC).isoformat(),
@@ -348,8 +384,15 @@ def _iem_rows(content: bytes, profile: AsiaCityProfile) -> list[dict[str, Any]]:
                 "altimeter_inhg": item.get("alti"),
                 "sea_level_pressure_mb": item.get("mslp"),
                 "visibility_miles": item.get("vsby"),
-                "weather_codes": item.get("wxcodes"),
-                "precip_1hr_inches": pd.NA,
+                "weather_codes": _iem_weather_code(
+                    item.get("wxcodes"),
+                    raw_metar=raw_metar,
+                    has_wxcodes_field=has_wxcodes_field,
+                    profile=profile,
+                ),
+                # IEM's p01i is the observed one-hour liquid precipitation.
+                # Preserve it exactly; weather codes are not a substitute amount.
+                "precip_1hr_inches": item.get("p01i"),
                 "sky_cover_1": item.get("skyc1"),
                 "sky_cover_2": item.get("skyc2"),
                 "sky_cover_3": item.get("skyc3"),
@@ -358,7 +401,7 @@ def _iem_rows(content: bytes, profile: AsiaCityProfile) -> list[dict[str, Any]]:
                 "sky_base_2_ft": item.get("skyl2"),
                 "sky_base_3_ft": item.get("skyl3"),
                 "sky_base_4_ft": item.get("skyl4"),
-                "raw_metar": item.get("metar"),
+                "raw_metar": raw_metar,
                 "source": "iem_asos_global_metar",
                 "observation_type": "METAR",
                 "qc_field": "iem_as_is_archive",
@@ -390,8 +433,10 @@ def normalize_metar_rows(
     for row in summarized:
         row["city_id"] = profile.city_id
         row["timing_mode"] = TIMING_MODE
-        row["observed_precip_recent_at_as_of"] = pd.NA
-        row["observed_precip_amount_available"] = False
+        precip = pd.to_numeric(
+            pd.Series([row.get("observed_precip_recent_at_as_of")]), errors="coerce"
+        ).iloc[0]
+        row["observed_precip_amount_available"] = bool(pd.notna(precip))
         row["observed_data_source"] = data_source
         row["observed_temp_at_as_of_c"] = _f_to_c(row.get("observed_temp_at_as_of_f"))
         row["observed_high_temp_through_as_of_c"] = _f_to_c(
@@ -1492,23 +1537,41 @@ def collect_live_observation(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     current = now or datetime.now(UTC)
-    # Match the production KDAL ML observation path: AWC is the one declared
-    # live distributor.  Keep it single-source so a retry cannot silently mix
-    # IEM and AWC records within the same model contract.
+    # Tokyo training uses IEM ASOS/METAR. Live collection intentionally uses
+    # that same station/population contract; do not relabel AWC as equivalent.
     response = _request(
-        AWC_METAR_URL,
-        params={"ids": profile.station_id, "format": "json", "hours": 36},
-        timeout=60,
+        IEM_ASOS_URL,
+        params=_iem_params(profile, contract_date, contract_date),
+        timeout=180,
     )
     content = response.content
     frame = normalize_metar_rows(
-        _awc_rows(response.json()),
+        _iem_rows(content, profile),
         profile,
         [contract_date],
-        source_filter="aviation_weather_center_metar",
-        data_source="aviation_weather_center_metar_live",
+        source_filter="iem_asos_global_metar",
+        data_source="iem_asos_global_metar_live",
     )
-    source_name = "aviation_weather_center_metar"
+    source_name = "iem_asos_global_metar"
+    required = (
+        "observed_humidity_at_as_of",
+        "observed_visibility_at_as_of",
+        "observed_precip_recent_at_as_of",
+    )
+    weather_code = frame.get("observed_weather_code_at_as_of", pd.Series(dtype=str))
+    complete = (
+        not frame.empty
+        and frame.get("observed_fetch_status", pd.Series(dtype=str)).astype(str).eq("ok").all()
+        and all(
+            name in frame
+            and pd.to_numeric(frame[name], errors="coerce").notna().all()
+            for name in required
+        )
+        and weather_code.astype(str).str.strip().ne("").all()
+    )
+    if not complete:
+        frame["observed_fetch_status"] = "unavailable"
+        frame["observed_unavailable_reason"] = "iem_required_runtime_observation_fields_missing"
     raw_path = _content_addressed_raw_path(
         data_root / "raw" / "live_observations" / profile.city_id,
         f"{contract_date}_{source_name}",
@@ -1532,7 +1595,7 @@ def collect_live_observation(
         "source": source_name,
         "status": (
             "complete"
-            if not frame.empty and frame["observed_fetch_status"].astype(str).eq("ok").all()
+            if complete
             else "incomplete"
         ),
         "raw_path": str(raw_path),

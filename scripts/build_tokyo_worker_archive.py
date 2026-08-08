@@ -13,6 +13,8 @@ RUNTIME_FILES = (
     "requirements.txt",
     "scripts/run_asia_11am_pull.py",
     "scripts/publish_tokyo_live_feature_artifact.py",
+    "scripts/build_tokyo_immutable_history.py",
+    "config/tokyo_iem_asos_observation_contract.json",
     "src/__init__.py",
     "src/asia_11am.py",
     "src/current_observations.py",
@@ -48,7 +50,7 @@ def source_commit(project_root: Path) -> str:
 
 def require_clean_tracked_tree(project_root: Path) -> None:
     dirty = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=no"],
+        ["git", "status", "--porcelain", "--untracked-files=all"],
         cwd=project_root,
         check=True,
         capture_output=True,

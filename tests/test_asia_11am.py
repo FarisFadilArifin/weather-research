@@ -131,6 +131,87 @@ def test_gfs_rows_use_celsius_and_expected_issue() -> None:
     assert len(frame) == 13
 
 
+def test_iem_rows_preserve_reported_p01i_without_weather_code_imputation() -> None:
+    raw = (
+        "station,valid,tmpf,p01i,wxcodes\n"
+        "RJTT,2026-08-06 10:00,86.0,0.03,-RA\n"
+    ).encode()
+    rows = asia_11am._iem_rows(raw, CITY_PROFILES["tokyo"])
+    assert len(rows) == 1
+    assert rows[0]["source"] == "iem_asos_global_metar"
+    assert rows[0]["precip_1hr_inches"] == 0.03
+
+
+def test_iem_blank_wxcodes_is_clear_weather_only_with_confirming_raw_metar() -> None:
+    clear_raw = (
+        "station,valid,tmpf,p01i,wxcodes,metar\n"
+        "RJTT,2026-08-06 10:00,86.0,0.00,,RJTT 061000Z 00000KT 9999 FEW020 25/20 Q1012\n"
+    ).encode()
+    clear = asia_11am._iem_rows(clear_raw, CITY_PROFILES["tokyo"])
+    assert clear[0]["weather_codes"] == asia_11am.IEM_CLEAR_WEATHER_SENTINEL
+    assert clear[0]["precip_1hr_inches"] == 0.0
+
+    conflicting_raw = (
+        "station,valid,tmpf,p01i,wxcodes,metar\n"
+        "RJTT,2026-08-06 10:00,86.0,0.00,,RJTT 061000Z 00000KT 3000 -RA BKN020 25/20 Q1012\n"
+    ).encode()
+    conflicting = asia_11am._iem_rows(conflicting_raw, CITY_PROFILES["tokyo"])
+    assert pd.isna(conflicting[0]["weather_codes"])
+    assert conflicting[0]["precip_1hr_inches"] == 0.0
+
+    missing_raw = (
+        "station,valid,tmpf,p01i,wxcodes,metar\n"
+        "RJTT,2026-08-06 10:00,86.0,0.00,,\n"
+    ).encode()
+    unavailable = asia_11am._iem_rows(missing_raw, CITY_PROFILES["tokyo"])
+    assert pd.isna(unavailable[0]["weather_codes"])
+
+
+def test_live_rjtt_observation_uses_iem_and_fails_closed_on_required_fields(
+    monkeypatch, tmp_path
+) -> None:
+    requested: dict[str, object] = {}
+
+    def fake_request(url, *, params, timeout):
+        requested.update(url=url, params=params, timeout=timeout)
+        return SimpleNamespace(content=b"IEM fixture", url="https://example.test/iem")
+
+    complete = pd.DataFrame(
+        [
+            {
+                "observed_fetch_status": "ok",
+                "observed_humidity_at_as_of": 70.0,
+                "observed_visibility_at_as_of": 6.0,
+                "observed_precip_recent_at_as_of": 0.02,
+                "observed_weather_code_at_as_of": "-RA",
+            }
+        ]
+    )
+    monkeypatch.setattr(asia_11am, "_request", fake_request)
+    monkeypatch.setattr(asia_11am, "_iem_rows", lambda content, profile: [])
+    monkeypatch.setattr(asia_11am, "normalize_metar_rows", lambda *args, **kwargs: complete)
+    monkeypatch.setattr(asia_11am, "_atomic_write_frame", lambda path, frame: None)
+
+    result = asia_11am.collect_live_observation(
+        tmp_path, CITY_PROFILES["tokyo"], date(2026, 8, 6), now=datetime(2026, 8, 6, tzinfo=UTC)
+    )
+
+    assert requested["url"] == asia_11am.IEM_ASOS_URL
+    assert ("station", "RJTT") in requested["params"]
+    assert result["source"] == "iem_asos_global_metar"
+    assert result["status"] == "complete"
+
+    incomplete = complete.drop(columns=["observed_visibility_at_as_of"])
+    monkeypatch.setattr(asia_11am, "normalize_metar_rows", lambda *args, **kwargs: incomplete)
+    result = asia_11am.collect_live_observation(
+        tmp_path, CITY_PROFILES["tokyo"], date(2026, 8, 6), now=datetime(2026, 8, 6, tzinfo=UTC)
+    )
+    assert result["status"] == "incomplete"
+    assert incomplete.loc[0, "observed_unavailable_reason"] == (
+        "iem_required_runtime_observation_fields_missing"
+    )
+
+
 def test_resolve_date_bounds_rejects_pre_jma_history() -> None:
     try:
         resolve_date_bounds("2022-07-02", "2022-07-03")

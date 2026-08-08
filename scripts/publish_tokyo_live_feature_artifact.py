@@ -41,7 +41,11 @@ REQUIRED_FIELDS = (
     "observed_temp_at_as_of_f",
     "observed_high_temp_through_as_of_f",
     "observed_as_of_age_minutes",
+    "observed_humidity_at_as_of",
+    "observed_visibility_at_as_of",
+    "observed_precip_recent_at_as_of",
 )
+REQUIRED_TEXT_FIELDS = ("observed_weather_code_at_as_of",)
 
 
 def clean_value(value: Any) -> Any:
@@ -75,8 +79,83 @@ def git_commit(project_root: Path) -> str:
     return commit
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_provider_contract(project_root: Path) -> dict[str, Any]:
+    path = project_root / "config" / "tokyo_iem_asos_observation_contract.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    provider = "iem_asos_global_metar"
+    if (
+        contract.get("trainingProvider") != provider
+        or contract.get("runtimeProvider") != provider
+    ):
+        raise ValueError("tokyo_provider_contract_not_iem_asos_global_metar")
+    required = set(contract.get("requiredRuntimeFields", []))
+    expected = {
+        "observed_humidity_at_as_of",
+        "observed_precip_recent_at_as_of",
+        "observed_visibility_at_as_of",
+        "observed_weather_code_at_as_of",
+    }
+    if not expected.issubset(required):
+        raise ValueError("tokyo_provider_contract_missing_required_runtime_fields")
+    weather_policy = contract.get("weatherCodePolicy", {})
+    if (
+        weather_policy.get("sourceField") != "IEM wxcodes"
+        or weather_policy.get("clearWeatherSentinel") != "NONE"
+    ):
+        raise ValueError("tokyo_provider_contract_weather_code_policy_invalid")
+    return contract
+
+
+def source_identity(project_root: Path, *, source_commit: str) -> dict[str, str]:
+    """Read the immutable worker manifest shipped with an archive release.
+
+    The manifest is deliberately inside the archive and has a checksum in the
+    payload; it names the clean commit without attempting to hash itself.
+    """
+    manifest_path = project_root / "WORKER-MANIFEST.json"
+    if not manifest_path.is_file():
+        raise ValueError("missing_worker_archive_manifest")
+    raw = manifest_path.read_bytes()
+    manifest = json.loads(raw)
+    if manifest.get("artifactType") != "weather_research_tokyo_worker_v1":
+        raise ValueError("invalid_worker_archive_manifest_type")
+    if manifest.get("sourceCommit") != source_commit:
+        raise ValueError("worker_archive_commit_mismatch")
+    files = manifest.get("files", {})
+    for name in (
+        "scripts/publish_tokyo_live_feature_artifact.py",
+        "src/asia_11am.py",
+        "config/tokyo_iem_asos_observation_contract.json",
+    ):
+        entry = files.get(name)
+        path = project_root / name
+        if not isinstance(entry, dict) or not path.is_file():
+            raise ValueError(f"worker_archive_missing_runtime_file:{name}")
+        if entry.get("sha256") != _sha256_file(path):
+            raise ValueError(f"worker_archive_file_checksum_mismatch:{name}")
+    return {
+        "cleanCommit": source_commit,
+        "workerArchiveManifestSha256": hashlib.sha256(raw).hexdigest(),
+        "workerArchiveArtifactType": str(manifest["artifactType"]),
+    }
+
+
 def build_payload(
-    frame: pd.DataFrame, contract_date: date, *, source_commit: str, generated_at: datetime
+    frame: pd.DataFrame,
+    contract_date: date,
+    *,
+    source_commit: str,
+    generated_at: datetime,
+    provider_contract: dict[str, Any],
+    archive_identity: dict[str, str],
 ) -> dict[str, Any]:
     alignment = frame.attrs.get("alignment")
     if not isinstance(alignment, dict) or alignment.get("alignmentStatus") != "aligned":
@@ -101,6 +180,20 @@ def build_payload(
     ]
     if missing:
         raise ValueError("missing_required_live_features:" + ",".join(missing))
+    missing_text = [
+        name
+        for name in REQUIRED_TEXT_FIELDS
+        if not isinstance(inputs.get(name), str) or not inputs[name].strip()
+    ]
+    if missing_text:
+        raise ValueError("missing_required_live_features:" + ",".join(missing_text))
+    runtime_provider = str(provider_contract["runtimeProvider"])
+    if inputs.get("observed_source") != runtime_provider:
+        raise ValueError("live_observation_source_contract_mismatch")
+    if inputs.get("observed_data_source") != f"{runtime_provider}_live":
+        raise ValueError("live_observation_data_source_contract_mismatch")
+    if archive_identity.get("cleanCommit") != source_commit:
+        raise ValueError("source_identity_commit_mismatch")
     observed = datetime.fromisoformat(str(inputs.get("observed_as_of_time_local") or ""))
     if observed.date() != contract_date or not (
         (observed.hour == 10 and observed.minute >= 40)
@@ -122,25 +215,91 @@ def build_payload(
         "observationSource": inputs.get("observed_source"),
         "generatedAtUtc": generated_at.astimezone(UTC).isoformat(),
         "acquisitionSourceCommit": source_commit,
+        "providerContract": {
+            "contractId": provider_contract["contractId"],
+            "trainingProvider": provider_contract["trainingProvider"],
+            "runtimeProvider": provider_contract["runtimeProvider"],
+            "population": provider_contract["population"],
+            "requiredRuntimeFields": provider_contract["requiredRuntimeFields"],
+            "weatherCodePolicy": provider_contract["weatherCodePolicy"],
+        },
+        "sourceIdentity": archive_identity,
         "featureInputs": inputs,
     }
 
 
+def _fsync_file(path: Path) -> None:
+    # Windows rejects fsync on a read-only CRT descriptor.
+    with path.open("r+b") as handle:
+        os.fsync(handle.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    # Directory fsync is unavailable on Windows; file fsync still protects the
+    # staged payload before the atomic rename there.
+    try:
+        descriptor = os.open(path, getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _validate_release(release_dir: Path, filename: str, payload: dict[str, Any]) -> None:
+    artifact = release_dir / filename
+    sidecar = release_dir / f"{filename}.sha256"
+    if not artifact.is_file() or not sidecar.is_file():
+        raise ValueError("release_artifact_or_sidecar_missing")
+    raw = artifact.read_bytes()
+    expected = hashlib.sha256(raw).hexdigest()
+    if sidecar.read_text(encoding="utf-8").split() != [expected, filename]:
+        raise ValueError("release_sidecar_checksum_mismatch")
+    if json.loads(raw) != payload:
+        raise ValueError("release_payload_validation_failed")
+
+
 def publish(payload: dict[str, Any], output_dir: Path) -> tuple[Path, Path]:
+    """Publish a complete release, then atomically switch only ``current``.
+
+    Consumers resolve both public files through one symlink.  They can never
+    observe a new JSON document paired with an older sidecar checksum.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
+    releases = output_dir / "releases"
+    releases.mkdir(exist_ok=True)
     filename = f"RJTT_{payload['contractDate']}.json"
-    destination = output_dir / filename
     raw = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
     digest = hashlib.sha256(raw).hexdigest()
-    with tempfile.TemporaryDirectory(dir=output_dir) as temporary:
-        root = Path(temporary)
-        artifact = root / filename
-        sidecar = root / f"{filename}.sha256"
-        artifact.write_bytes(raw)
-        sidecar.write_text(f"{digest}  {filename}\n", encoding="utf-8")
-        os.replace(artifact, destination)
-        os.replace(sidecar, destination.with_suffix(".json.sha256"))
-    return destination, destination.with_suffix(".json.sha256")
+    release_name = f"RJTT_{payload['contractDate']}_{digest[:16]}"
+    destination = releases / release_name
+    if destination.exists():
+        _validate_release(destination, filename, payload)
+    else:
+        with tempfile.TemporaryDirectory(dir=releases, prefix=".stage-") as temporary:
+            root = Path(temporary)
+            artifact = root / filename
+            sidecar = root / f"{filename}.sha256"
+            artifact.write_bytes(raw)
+            sidecar.write_text(f"{digest}  {filename}\n", encoding="utf-8")
+            _fsync_file(artifact)
+            _fsync_file(sidecar)
+            _validate_release(root, filename, payload)
+            _fsync_directory(root)
+            os.replace(root, destination)
+            _fsync_directory(releases)
+            _validate_release(destination, filename, payload)
+    current = output_dir / "current"
+    temporary_link = output_dir / f".current-{os.getpid()}-{digest[:12]}"
+    try:
+        os.symlink(Path("releases") / release_name, temporary_link, target_is_directory=True)
+        os.replace(temporary_link, current)
+    finally:
+        if temporary_link.is_symlink():
+            temporary_link.unlink()
+    _fsync_directory(output_dir)
+    return current / filename, current / f"{filename}.sha256"
 
 
 def parse_args() -> argparse.Namespace:
@@ -177,7 +336,14 @@ def main() -> int:
         providers=PROVIDERS,
     )
     payload = build_payload(
-        frame, day, source_commit=git_commit(project_root), generated_at=current
+        frame,
+        day,
+        source_commit=git_commit(project_root),
+        generated_at=current,
+        provider_contract=load_provider_contract(project_root),
+        archive_identity=source_identity(
+            project_root, source_commit=git_commit(project_root)
+        ),
     )
     artifact, sidecar = publish(payload, args.output_dir)
     print(json.dumps({"status": "ok", "artifact": str(artifact), "sidecar": str(sidecar)}))
