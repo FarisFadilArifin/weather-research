@@ -8,7 +8,7 @@ import os
 import subprocess
 import tempfile
 from datetime import UTC, date, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -46,6 +46,31 @@ REQUIRED_FIELDS = (
     "observed_precip_recent_at_as_of",
 )
 REQUIRED_TEXT_FIELDS = ("observed_weather_code_at_as_of",)
+WORKER_MANIFEST_SCHEMA_VERSION = 1
+# This is the exact runtime payload set constructed by
+# scripts/build_tokyo_worker_archive.py.  Keep this independent assertion at
+# the publication boundary: a manifest cannot be trusted to define what it is
+# permitted to attest to.
+EXPECTED_WORKER_RUNTIME_PAYLOADS = (
+    ".source-commit",
+    "config/tokyo_iem_asos_observation_contract.json",
+    "requirements.txt",
+    "scripts/build_tokyo_immutable_history.py",
+    "scripts/publish_tokyo_live_feature_artifact.py",
+    "scripts/run_asia_11am_pull.py",
+    "src/__init__.py",
+    "src/asia_11am.py",
+    "src/calibration/__init__.py",
+    "src/calibration/asia_station_stacking.py",
+    "src/calibration/data_quality.py",
+    "src/calibration/dataset.py",
+    "src/calibration/sdk_pipeline.py",
+    "src/calibration/station_stacking.py",
+    "src/calibration/time_rules.py",
+    "src/current_observations.py",
+    "src/direct_nwp_fetch.py",
+    "src/wunderground_history.py",
+)
 
 
 def clean_value(value: Any) -> Any:
@@ -87,6 +112,13 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _safe_runtime_payload_path(name: object) -> bool:
+    if not isinstance(name, str) or not name or "\\" in name or ":" in name:
+        return False
+    path = PurePosixPath(name)
+    return not path.is_absolute() and ".." not in path.parts and str(path) == name
+
+
 def load_provider_contract(project_root: Path) -> dict[str, Any]:
     path = project_root / "config" / "tokyo_iem_asos_observation_contract.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -125,22 +157,53 @@ def source_identity(project_root: Path, *, source_commit: str) -> dict[str, str]
         raise ValueError("missing_worker_archive_manifest")
     raw = manifest_path.read_bytes()
     manifest = json.loads(raw)
+    if not isinstance(manifest, dict):
+        raise ValueError("invalid_worker_archive_manifest")
+    if manifest.get("schemaVersion") != WORKER_MANIFEST_SCHEMA_VERSION:
+        raise ValueError("invalid_worker_archive_manifest_schema")
     if manifest.get("artifactType") != "weather_research_tokyo_worker_v1":
         raise ValueError("invalid_worker_archive_manifest_type")
     if manifest.get("sourceCommit") != source_commit:
         raise ValueError("worker_archive_commit_mismatch")
-    files = manifest.get("files", {})
-    for name in (
-        "scripts/publish_tokyo_live_feature_artifact.py",
-        "src/asia_11am.py",
-        "config/tokyo_iem_asos_observation_contract.json",
+    if manifest.get("entrypoint") != "scripts.publish_tokyo_live_feature_artifact":
+        raise ValueError("worker_archive_entrypoint_mismatch")
+    runtime_payloads = manifest.get("runtimePayloads")
+    if (
+        not isinstance(runtime_payloads, list)
+        or any(not _safe_runtime_payload_path(name) for name in runtime_payloads)
+        or len(runtime_payloads) != len(set(runtime_payloads))
+        or runtime_payloads != list(EXPECTED_WORKER_RUNTIME_PAYLOADS)
     ):
-        entry = files.get(name)
+        raise ValueError("worker_archive_manifest_runtime_payloads_mismatch")
+    files = manifest.get("files")
+    if not isinstance(files, dict):
+        raise ValueError("worker_archive_manifest_files_invalid")
+    if any(not _safe_runtime_payload_path(name) for name in files):
+        raise ValueError("worker_archive_unsafe_runtime_path")
+    if set(files) != set(EXPECTED_WORKER_RUNTIME_PAYLOADS):
+        raise ValueError("worker_archive_manifest_files_mismatch")
+    for name in EXPECTED_WORKER_RUNTIME_PAYLOADS:
+        entry = files[name]
         path = project_root / name
-        if not isinstance(entry, dict) or not path.is_file():
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"sha256", "size"}
+            or not isinstance(entry.get("sha256"), str)
+            or len(entry["sha256"]) != 64
+            or any(character not in "0123456789abcdef" for character in entry["sha256"].lower())
+            or not isinstance(entry.get("size"), int)
+            or isinstance(entry["size"], bool)
+            or entry["size"] < 0
+        ):
+            raise ValueError(f"worker_archive_manifest_file_entry_invalid:{name}")
+        if not path.is_file() or path.is_symlink():
             raise ValueError(f"worker_archive_missing_runtime_file:{name}")
+        if path.stat().st_size != entry["size"]:
+            raise ValueError(f"worker_archive_file_size_mismatch:{name}")
         if entry.get("sha256") != _sha256_file(path):
             raise ValueError(f"worker_archive_file_checksum_mismatch:{name}")
+    if (project_root / ".source-commit").read_bytes() != (source_commit + "\n").encode():
+        raise ValueError("worker_archive_source_commit_payload_mismatch")
     return {
         "cleanCommit": source_commit,
         "workerArchiveManifestSha256": hashlib.sha256(raw).hexdigest(),

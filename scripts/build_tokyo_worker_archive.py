@@ -28,6 +28,8 @@ RUNTIME_FILES = (
     "src/calibration/station_stacking.py",
     "src/calibration/time_rules.py",
 )
+WORKER_MANIFEST_SCHEMA_VERSION = 1
+RUNTIME_PAYLOADS = tuple(sorted((*RUNTIME_FILES, ".source-commit")))
 BANNED_IDENTIFIERS = (b"hko", b"hong kong", b"hong_kong")
 
 
@@ -62,7 +64,14 @@ def require_clean_tracked_tree(project_root: Path) -> None:
 
 def _tar_info(name: str, size: int) -> tarfile.TarInfo:
     path = PurePosixPath(name)
-    if path.is_absolute() or ".." in path.parts:
+    if (
+        not name
+        or "\\" in name
+        or ":" in name
+        or str(path) != name
+        or path.is_absolute()
+        or ".." in path.parts
+    ):
         raise ValueError(f"unsafe_archive_path:{name}")
     info = tarfile.TarInfo(str(path))
     info.size = size
@@ -87,9 +96,12 @@ def build_archive(
         require_clean_tracked_tree(project_root)
     if len(commit) != 40 or any(ch not in "0123456789abcdef" for ch in commit.lower()):
         raise ValueError("invalid_source_commit")
+    if len(RUNTIME_FILES) != len(set(RUNTIME_FILES)):
+        raise ValueError("duplicate_runtime_file")
 
     payloads: dict[str, bytes] = {}
     for relative in RUNTIME_FILES:
+        _tar_info(relative, 0)
         path = project_root / relative
         if not path.is_file():
             raise FileNotFoundError(relative)
@@ -99,11 +111,18 @@ def build_archive(
             raise ValueError(f"retired_station_identifier:{relative}")
         payloads[relative] = raw
     payloads[".source-commit"] = (commit + "\n").encode()
+    if tuple(sorted(payloads)) != RUNTIME_PAYLOADS:
+        raise ValueError("runtime_payload_manifest_mismatch")
 
     manifest = {
+        "schemaVersion": WORKER_MANIFEST_SCHEMA_VERSION,
         "artifactType": "weather_research_tokyo_worker_v1",
         "sourceCommit": commit,
         "entrypoint": "scripts.publish_tokyo_live_feature_artifact",
+        # WORKER-MANIFEST.json is intentionally excluded: a manifest cannot
+        # contain a stable checksum of itself.  Every executable/runtime input
+        # is instead enumerated here, including the archive commit marker.
+        "runtimePayloads": list(RUNTIME_PAYLOADS),
         "files": {
             name: {"sha256": sha256_bytes(raw), "size": len(raw)}
             for name, raw in sorted(payloads.items())

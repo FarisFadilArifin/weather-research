@@ -194,25 +194,84 @@ def test_source_commit_can_be_declared_for_archive_deployments(tmp_path, monkeyp
     assert MODULE.git_commit(tmp_path) == "c" * 40
 
 
-def test_source_identity_requires_matching_worker_archive_manifest(tmp_path):
-    files = {
-        "scripts/publish_tokyo_live_feature_artifact.py": b"publisher",
-        "src/asia_11am.py": b"collector",
-        "config/tokyo_iem_asos_observation_contract.json": b"contract",
-    }
-    for name, raw in files.items():
+def write_worker_archive_root(tmp_path: Path, commit: str = "a" * 40) -> dict[str, object]:
+    files: dict[str, bytes] = {}
+    for index, name in enumerate(MODULE.EXPECTED_WORKER_RUNTIME_PAYLOADS):
+        raw = (commit + "\n").encode() if name == ".source-commit" else f"runtime-{index}:{name}".encode()
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(raw)
+        files[name] = raw
     manifest = {
+        "schemaVersion": MODULE.WORKER_MANIFEST_SCHEMA_VERSION,
         "artifactType": "weather_research_tokyo_worker_v1",
-        "sourceCommit": "a" * 40,
+        "sourceCommit": commit,
+        "entrypoint": "scripts.publish_tokyo_live_feature_artifact",
+        "runtimePayloads": list(MODULE.EXPECTED_WORKER_RUNTIME_PAYLOADS),
         "files": {
-            name: {"sha256": hashlib.sha256(raw).hexdigest()}
+            name: {"sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)}
             for name, raw in files.items()
         },
     }
     (tmp_path / "WORKER-MANIFEST.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return manifest
+
+
+def test_source_identity_requires_complete_matching_worker_archive_manifest(tmp_path):
+    write_worker_archive_root(tmp_path)
     identity = MODULE.source_identity(tmp_path, source_commit="a" * 40)
     assert identity["cleanCommit"] == "a" * 40
     assert len(identity["workerArchiveManifestSha256"]) == 64
+
+
+@pytest.mark.parametrize(
+    ("name", "same_size", "error"),
+    (
+        (
+            "src/calibration/asia_station_stacking.py",
+            True,
+            "worker_archive_file_checksum_mismatch:src/calibration/asia_station_stacking.py",
+        ),
+        (
+            "src/current_observations.py",
+            False,
+            "worker_archive_file_size_mismatch:src/current_observations.py",
+        ),
+    ),
+)
+def test_source_identity_rejects_mutated_runtime_payloads(
+    tmp_path: Path, name: str, same_size: bool, error: str
+) -> None:
+    write_worker_archive_root(tmp_path)
+    with (tmp_path / name).open("r+b" if same_size else "ab") as handle:
+        if same_size:
+            handle.write(b"X")
+        else:
+            handle.write(b"mutated")
+    with pytest.raises(ValueError, match=error):
+        MODULE.source_identity(tmp_path, source_commit="a" * 40)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error"),
+    (
+        ("missing", "worker_archive_manifest_files_mismatch"),
+        ("extra", "worker_archive_manifest_files_mismatch"),
+        ("unsafe", "worker_archive_unsafe_runtime_path"),
+    ),
+)
+def test_source_identity_rejects_missing_extra_and_unsafe_manifest_entries(
+    tmp_path: Path, mutation: str, error: str
+) -> None:
+    manifest = write_worker_archive_root(tmp_path)
+    files = manifest["files"]
+    assert isinstance(files, dict)
+    if mutation == "missing":
+        del files["src/calibration/asia_station_stacking.py"]
+    elif mutation == "extra":
+        files["unexpected.py"] = {"sha256": "a" * 64, "size": 0}
+    else:
+        files["../outside.py"] = {"sha256": "a" * 64, "size": 0}
+    (tmp_path / "WORKER-MANIFEST.json").write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match=error):
+        MODULE.source_identity(tmp_path, source_commit="a" * 40)
