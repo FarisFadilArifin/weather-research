@@ -85,6 +85,14 @@ selection, blend selection, and policy selection happen inside the applicable
 training history. A previously inspected holdout cannot become promotion
 evidence.
 
+Point exports have two distinct roles. The evaluation bundle is frozen through
+the year before the configured holdout and is the only point dependency that
+may support exploratory holdout reporting or probability-model evidence. An
+optional live-production bundle may refit through the latest completed actual,
+but it must use a distinct model version and immutable release record and must
+not claim the inspected holdout as out-of-sample evidence. The station notebook
+keeps live export disabled by default.
+
 New stations may use different calendar years only when their config and
 documentation explicitly define an equivalent chronological contract.
 
@@ -112,6 +120,11 @@ median imputer -> standard scaler -> ordinal logistic model
 Fit the imputer and scaler on the fold's training rows only. The current verified
 contract does not use skew transforms, winsorization, or feature clipping.
 Feature ablations select columns before fitting this pipeline.
+
+The point-model feature-missingness gate follows the same rule: calculate it on
+each applicable training fold, and apply it again on the frozen evaluation or
+live-production refit rows. Never export with a weaker missingness contract than
+the one used to select and evaluate the model.
 
 ## KDAL three-arm probability contract
 

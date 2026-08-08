@@ -11,6 +11,8 @@
   "point_source_output_token": "DATA_ROOT / \"models\" / f\"v20_{CITY_ID}_no_peak\"",
   "point_source_pipeline_token": "source_pipeline=f\"notebooks/experiments/station_stacking_v20_asia_no_peak/{CITY_ID}\"",
   "point_model_version": "station_high_regressor_baseline_seoul_no_peak_stack",
+  "point_evaluation_train_years": [2022, 2025],
+  "point_live_model_version": "station_high_regressor_live_seoul_no_peak_stack_2026",
   "probability_model_label": "Seoul 1C Market Ordinal Probability Model",
   "probability_model_version": "station_bucket_baseline_seoul_1c_market_ordinal",
   "probability_target": "celsius_market_1c",

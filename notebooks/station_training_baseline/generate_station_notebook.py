@@ -43,6 +43,8 @@ def _load_config(path: Path) -> dict[str, Any]:
         "point_source_output_token",
         "point_source_pipeline_token",
         "point_model_version",
+        "point_evaluation_train_years",
+        "point_live_model_version",
         "probability_model_label",
         "probability_model_version",
         "probability_feature_profile",
@@ -63,6 +65,22 @@ def _load_config(path: Path) -> dict[str, Any]:
     ):
         if not config[setting]:
             raise ValueError(f"{setting} must not be empty")
+    evaluation_years = tuple(
+        int(year) for year in config["point_evaluation_train_years"]
+    )
+    if len(evaluation_years) != 2 or evaluation_years[0] > evaluation_years[1]:
+        raise ValueError(
+            "point_evaluation_train_years must be [START_YEAR, END_YEAR]"
+        )
+    if evaluation_years[1] != int(config["probability_holdout_year"]) - 1:
+        raise ValueError(
+            "point evaluation training must end in the year before the holdout"
+        )
+    config["point_evaluation_train_years"] = list(evaluation_years)
+    live_version = str(config["point_live_model_version"]).strip()
+    if not live_version or live_version == str(config["point_model_version"]).strip():
+        raise ValueError("point_live_model_version must be non-empty and distinct")
+    config["point_live_model_version"] = live_version
     return config
 
 
@@ -170,15 +188,49 @@ def _configure_point_workflow(
             optuna_settings,
             setting="optuna_settings",
         )
-    if config.get("point_export_uses_feature_missingness_gate"):
+    export_cells = [
+        cell
+        for cell in notebook["cells"]
+        if "export_station_model_weights(" in "".join(cell.get("source", []))
+    ]
+    if len(export_cells) != 1:
+        raise ValueError(
+            "base notebook must contain exactly one point-model export cell"
+        )
+    export_source = "".join(export_cells[0]["source"])
+    if "max_feature_missing_fraction=" not in export_source:
         _replace_required(
             notebook,
             "        stack_enabled=config.stack_enabled,\n",
             "        stack_enabled=config.stack_enabled,\n"
             "        max_feature_missing_fraction="
             "config.effective_max_feature_missing_fraction,\n",
-            setting="point_export_uses_feature_missingness_gate",
+            setting="point_export_feature_missingness_gate",
         )
+    _replace_required(
+        notebook,
+        "        model_version=MODEL_VERSION,\n",
+        "        model_version=MODEL_VERSION,\n"
+        "        train_years=POINT_EVALUATION_TRAIN_YEARS,\n",
+        setting="point_evaluation_train_years",
+    )
+    export_source = "".join(export_cells[0]["source"]).rstrip()
+    export_verification = """
+
+if EXPORT_MODEL_WEIGHTS:
+    import json as _point_export_json
+
+    evaluation_point_manifest = _point_export_json.loads(
+        exported_weights.manifest_path.read_text(encoding="utf-8")
+    )
+    assert evaluation_point_manifest["model_version"] == MODEL_VERSION
+    assert evaluation_point_manifest["training"]["train_start_year"] == POINT_EVALUATION_TRAIN_YEARS[0]
+    assert evaluation_point_manifest["training"]["train_end_year"] == POINT_EVALUATION_TRAIN_YEARS[1]
+    assert evaluation_point_manifest["model_contract"]["max_feature_missing_fraction"] == config.effective_max_feature_missing_fraction
+"""
+    export_cells[0]["source"] = (
+        export_source + export_verification
+    ).splitlines(keepends=True)
     _replace_in_cells(notebook, "## V11 Contract", "## Point-model contract")
     _replace_in_cells(
         notebook,
@@ -236,6 +288,10 @@ celsius_predictions.head()
     )
     probability_settings = (
         marker
+        + "EXPORT_LIVE_MODEL_WEIGHTS = False\n"
+        + "POINT_EVALUATION_TRAIN_YEARS = "
+        + f'{tuple(config["point_evaluation_train_years"])!r}\n'
+        + f'LIVE_POINT_MODEL_VERSION = "{config["point_live_model_version"]}"\n'
         + f'PROBABILITY_MODEL_VERSION = "{config["probability_model_version"]}"\n'
         + market_settings
         + f'PROBABILITY_FEATURE_PROFILE = "{config["probability_feature_profile"]}"\n'
@@ -261,6 +317,62 @@ celsius_predictions.head()
         "ordinal probability model. Versioned source notebooks remain "
         "reference-only; new station work starts here.\n"
     )
+
+    export_index = next(
+        index
+        for index, cell in enumerate(notebook["cells"])
+        if "export_station_model_weights(" in "".join(cell.get("source", []))
+    )
+    source_pipeline = (
+        "notebooks/station_training_baseline/"
+        f'{Path(config["notebook_path"]).parent.as_posix()}'
+    )
+    live_cells = [
+        _markdown(
+            """## Optional live-production point bundle
+
+The evaluation bundle above is frozen before the exploratory holdout and is the
+only point bundle used by probability training and holdout reporting. A live
+production refit may use all completed actuals, including completed holdout-year
+dates, but it has a distinct version and cannot claim holdout performance as
+out-of-sample evidence. Keep this export disabled until the source is committed;
+then create the immutable release record in a separate promotion review.
+"""
+        ),
+        _code(
+            f"""live_exported_weights = None
+if EXPORT_LIVE_MODEL_WEIGHTS:
+    live_exported_weights = export_station_model_weights(
+        project_root=PROJECT_ROOT,
+        station_id=STATION_ID,
+        city_id=CITY_ID if "CITY_ID" in globals() else None,
+        artifact_dir=config.resolved_output_dir(),
+        model_version=LIVE_POINT_MODEL_VERSION,
+        train_years=None,
+        timing_mode=config.timing_mode,
+        providers=tuple(config.providers),
+        feature_version=config.effective_feature_version,
+        training_profile=config.effective_training_profile,
+        optuna_metric=config.effective_optuna_metric,
+        target_mode=config.effective_target_mode,
+        target_source=config.effective_target_source,
+        base_model_methods=tuple(config.effective_base_model_methods),
+        stack_enabled=config.stack_enabled,
+        max_feature_missing_fraction=config.effective_max_feature_missing_fraction,
+        source_pipeline="{source_pipeline}",
+    )
+    assert live_exported_weights.bundle_path != exported_weights.bundle_path
+    assert LIVE_POINT_MODEL_VERSION != MODEL_VERSION
+    print(
+        "Live bundle exported as an unreleased candidate. "
+        "Create a clean-checkout release record before promotion."
+    )
+else:
+    print("Live-production export disabled; evaluation bundle remains frozen.")
+"""
+        ),
+    ]
+    notebook["cells"][export_index + 1 : export_index + 1] = live_cells
 
 
 def _celsius_market_probability_cells(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -908,6 +1020,11 @@ def build_notebook(config: dict[str, Any]) -> dict[str, Any]:
     notebook["metadata"]["station_training_baseline"] = {
         "station_id": config["station_id"],
         "point_model_version": config["point_model_version"],
+        "point_evaluation_train_years": list(
+            config["point_evaluation_train_years"]
+        ),
+        "point_live_model_version": config["point_live_model_version"],
+        "point_live_export_default": False,
         "probability_model_label": config["probability_model_label"],
         "probability_model_version": config["probability_model_version"],
         "probability_target": config.get("probability_target", "fahrenheit_2f"),
@@ -962,20 +1079,25 @@ def build_notebook(config: dict[str, Any]) -> dict[str, Any]:
 def _preserve_existing_notebook_state(
     generated: dict[str, Any], existing: dict[str, Any]
 ) -> dict[str, Any]:
-    """Carry notebook execution state forward when source cells are regenerated."""
+    """Carry execution state for source-identical cells across regeneration."""
     generated_cells = generated.get("cells", [])
     existing_cells = existing.get("cells", [])
-    if len(generated_cells) != len(existing_cells):
-        raise ValueError(
-            "refusing to overwrite generated notebook with a different cell count; "
-            "saved outputs and metadata could not be preserved"
+    existing_by_source: dict[tuple[str, tuple[str, ...]], list[dict[str, Any]]] = {}
+    for existing_cell in existing_cells:
+        signature = (
+            str(existing_cell.get("cell_type", "")),
+            tuple(existing_cell.get("source", [])),
         )
-    for generated_cell, existing_cell in zip(generated_cells, existing_cells, strict=True):
-        if generated_cell.get("cell_type") != existing_cell.get("cell_type"):
-            raise ValueError(
-                "refusing to overwrite generated notebook with different cell types; "
-                "saved outputs and metadata could not be preserved"
-            )
+        existing_by_source.setdefault(signature, []).append(existing_cell)
+    for generated_cell in generated_cells:
+        signature = (
+            str(generated_cell.get("cell_type", "")),
+            tuple(generated_cell.get("source", [])),
+        )
+        matches = existing_by_source.get(signature, [])
+        if not matches:
+            continue
+        existing_cell = matches.pop(0)
         generated_cell["metadata"] = dict(existing_cell.get("metadata", {}))
         if generated_cell.get("cell_type") == "code":
             generated_cell["execution_count"] = existing_cell.get("execution_count")

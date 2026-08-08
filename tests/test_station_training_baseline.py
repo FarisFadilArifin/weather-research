@@ -72,6 +72,16 @@ def test_kdal_baseline_is_one_self_contained_station_workflow() -> None:
     assert 'target_source="wunderground_only"' in source
     assert 'base_model_methods=("xgboost", "lightgbm", "catboost")' in source
     assert "run_station_year_split_experiment(config)" in source
+    assert "POINT_EVALUATION_TRAIN_YEARS = (2021, 2025)" in source
+    assert "train_years=POINT_EVALUATION_TRAIN_YEARS" in source
+    assert (
+        "max_feature_missing_fraction=config.effective_max_feature_missing_fraction"
+        in source
+    )
+    assert "EXPORT_LIVE_MODEL_WEIGHTS = False" in source
+    assert "LIVE_POINT_MODEL_VERSION != MODEL_VERSION" in source
+    assert 'evaluation_point_manifest["training"]["train_end_year"]' in source
+    assert 'evaluation_point_manifest["model_contract"]["max_feature_missing_fraction"]' in source
     assert "Ordinal Probabilities Model 2" in source
     assert 'forced_family="ordinal_logistic"' in source
     assert "blend_weights=(1.0,)" in source
@@ -105,6 +115,12 @@ def test_kdal_baseline_freezes_probability_chronology_and_metadata() -> None:
     )
     assert 'period="holdout_2026"' in source
     assert metadata["station_id"] == "KDAL"
+    assert metadata["point_evaluation_train_years"] == [2021, 2025]
+    assert (
+        metadata["point_live_model_version"]
+        == "station_high_regressor_live_kdal_no_peak_stack_2026"
+    )
+    assert metadata["point_live_export_default"] is False
     assert metadata["probability_model_label"] == "Ordinal Probabilities Model 2"
     assert metadata["probability_family"] == "ordinal_logistic"
     assert metadata["probability_blend_weight"] == 1.0
@@ -148,12 +164,16 @@ def test_seoul_and_tokyo_follow_station_baseline_contract() -> None:
             "city_id": "seoul",
             "timezone": "Asia/Seoul",
             "model_version": "station_high_regressor_baseline_seoul_no_peak_stack",
+            "evaluation_years": [2022, 2025],
+            "live_model_version": "station_high_regressor_live_seoul_no_peak_stack_2026",
         },
         "Tokyo": {
             "station_id": "RJTT",
             "city_id": "tokyo",
             "timezone": "Asia/Tokyo",
             "model_version": "station_high_regressor_baseline_tokyo_no_peak_stack",
+            "evaluation_years": [2022, 2025],
+            "live_model_version": "station_high_regressor_live_tokyo_no_peak_stack_2026",
         },
     }
     for station_key, contract in expected.items():
@@ -186,11 +206,17 @@ def test_seoul_and_tokyo_follow_station_baseline_contract() -> None:
             assert "fit_probability_system(" in source
             assert "export_probability_bundle(" in source
         assert "export_station_model_weights(" in source
-        if station_key == "Tokyo":
-            assert (
-                "max_feature_missing_fraction=config.effective_max_feature_missing_fraction"
-                in source
-            )
+        assert "POINT_EVALUATION_TRAIN_YEARS = (2022, 2025)" in source
+        assert "train_years=POINT_EVALUATION_TRAIN_YEARS" in source
+        assert (
+            "max_feature_missing_fraction=config.effective_max_feature_missing_fraction"
+            in source
+        )
+        assert "EXPORT_LIVE_MODEL_WEIGHTS = False" in source
+        assert f'LIVE_POINT_MODEL_VERSION = "{contract["live_model_version"]}"' in source
+        assert "train_years=None" in source
+        assert 'evaluation_point_manifest["training"]["train_end_year"]' in source
+        assert 'evaluation_point_manifest["model_contract"]["max_feature_missing_fraction"]' in source
         assert "run_challenger()" not in source
         assert "hrrr" not in source.lower()
         assert "nbm" not in source.lower()
@@ -205,6 +231,9 @@ def test_seoul_and_tokyo_follow_station_baseline_contract() -> None:
         )
         assert metadata["station_id"] == contract["station_id"]
         assert metadata["point_model_version"] == contract["model_version"]
+        assert metadata["point_evaluation_train_years"] == contract["evaluation_years"]
+        assert metadata["point_live_model_version"] == contract["live_model_version"]
+        assert metadata["point_live_export_default"] is False
         assert metadata["probability_feature_profile"] == "asia_no_peak"
         assert metadata["probability_feature_count"] == 59
         assert metadata["probability_providers"] == [
@@ -237,11 +266,11 @@ def test_regeneration_preserves_existing_notebook_outputs_and_metadata() -> None
     generator = _generator_module()
     generated = {
         "cells": [
-            {"cell_type": "markdown", "metadata": {}, "source": ["new\n"]},
+            {"cell_type": "markdown", "metadata": {}, "source": ["same\n"]},
             {
                 "cell_type": "code",
                 "metadata": {},
-                "source": ["new_code()\n"],
+                "source": ["same_code()\n"],
                 "execution_count": None,
                 "outputs": [],
             },
@@ -250,11 +279,11 @@ def test_regeneration_preserves_existing_notebook_outputs_and_metadata() -> None
     }
     existing = {
         "cells": [
-            {"cell_type": "markdown", "metadata": {"tag": "note"}, "source": ["old\n"]},
+            {"cell_type": "markdown", "metadata": {"tag": "note"}, "source": ["same\n"]},
             {
                 "cell_type": "code",
                 "metadata": {"tag": "run"},
-                "source": ["old_code()\n"],
+                "source": ["same_code()\n"],
                 "execution_count": 4,
                 "outputs": [{"output_type": "stream", "name": "stdout", "text": "saved\n"}],
             },
@@ -262,9 +291,53 @@ def test_regeneration_preserves_existing_notebook_outputs_and_metadata() -> None
         "metadata": {"language_info": {"name": "python"}, "station_training_baseline": {"old": True}},
     }
     merged = generator._preserve_existing_notebook_state(generated, existing)
-    assert merged["cells"][0]["source"] == ["new\n"]
+    assert merged["cells"][0]["source"] == ["same\n"]
     assert merged["cells"][0]["metadata"] == {"tag": "note"}
     assert merged["cells"][1]["outputs"] == existing["cells"][1]["outputs"]
     assert merged["cells"][1]["execution_count"] == 4
     assert merged["metadata"]["language_info"] == {"name": "python"}
     assert merged["metadata"]["station_training_baseline"] == {"station_id": "RJTT"}
+
+
+def test_regeneration_allows_new_cells_without_reusing_stale_state() -> None:
+    generator = _generator_module()
+    generated = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "metadata": {},
+                "source": ["same_code()\n"],
+                "execution_count": None,
+                "outputs": [],
+            },
+            {
+                "cell_type": "code",
+                "metadata": {},
+                "source": ["new_code()\n"],
+                "execution_count": None,
+                "outputs": [],
+            },
+        ],
+        "metadata": {"station_training_baseline": {"station_id": "KDAL"}},
+    }
+    existing = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "metadata": {"tag": "run"},
+                "source": ["same_code()\n"],
+                "execution_count": 7,
+                "outputs": [
+                    {"output_type": "stream", "name": "stdout", "text": "saved\n"}
+                ],
+            }
+        ],
+        "metadata": {"station_training_baseline": {"old": True}},
+    }
+
+    merged = generator._preserve_existing_notebook_state(generated, existing)
+
+    assert merged["cells"][0]["execution_count"] == 7
+    assert merged["cells"][0]["metadata"] == {"tag": "run"}
+    assert merged["cells"][1]["execution_count"] is None
+    assert merged["cells"][1]["outputs"] == []

@@ -11,6 +11,8 @@
   "point_source_output_token": "PROJECT_ROOT / \"data\" / \"calibration\" / \"station_stacking_v20_kdal_no_peak\"",
   "point_source_pipeline_token": "source_pipeline=\"notebooks/experiments/station_stacking_v20_kdal_no_peak\"",
   "point_model_version": "station_high_regressor_baseline_kdal_no_peak_stack",
+  "point_evaluation_train_years": [2021, 2025],
+  "point_live_model_version": "station_high_regressor_live_kdal_no_peak_stack_2026",
   "probability_model_label": "Ordinal Probabilities Model 2",
   "probability_model_version": "station_bucket_baseline_kdal_no_peak_ordinal_pure",
   "probability_feature_profile": "common_no_peak",

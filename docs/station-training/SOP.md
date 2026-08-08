@@ -103,6 +103,13 @@ three-arm challenger reloads the just-exported baseline feature, prediction, and
 point-weight artifacts so the command-line runner and notebook share one
 implementation.
 
+The default point export is the evaluation bundle and must pass explicit
+`train_years` ending before the holdout plus the configured feature-missingness
+gate. Probability and challenger exports bind to this frozen bundle. The
+optional live-production export uses a separate model version, may include the
+latest completed actuals, and stays disabled until a clean source commit and
+separate release-provenance review are available.
+
 ## 6. Review training evidence
 
 Confirm:
@@ -168,6 +175,12 @@ release record as described in `RELEASE_PROVENANCE.md`. The registry requires a
 clean source commit and hashes the exact dataset, features, generated notebook,
 export, model, ordinary manifest, and runtime inputs. It rejects dirty or
 mismatched inputs and must never overwrite a mutable bundle.
+
+`git_dirty: true` in an ordinary model manifest means tracked source content at
+training time was not fully represented by the recorded commit. The bundle can
+be used for local research, but it is not reproducible from that commit and is
+not eligible for an immutable release record. Commit the intended source first,
+then retrain from the clean checkout; do not suppress or rewrite the dirty flag.
 
 Put temporary comparisons in an explicit experiment directory. Preserve
 historical versioned notebooks as evidence, and merge accepted behavior into the
