@@ -31,6 +31,8 @@ SETTLEMENT_COLUMNS = [
     "station_id",
     "contract_date",
     "settlement_high_f",
+    "settlement_high_c",
+    "settlement_unit",
     "settlement_source",
     "source_url",
     "quality_flag",
@@ -122,14 +124,28 @@ class WeatherCompanyPwsClient:
 @dataclass(frozen=True)
 class WeatherCompanyStationHistoryClient:
     api_key: str
-    base_url: str = "https://api.weather.com/v1/location/{station_id}:9:US/observations/historical.json"
+    base_url: str = (
+        "https://api.weather.com/v1/location/"
+        "{station_id}:9:{country}/observations/historical.json"
+    )
     timeout_seconds: int = 60
 
-    def fetch_observations(self, station_id: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
-        url = self.base_url.format(station_id=station_id.upper())
+    def fetch_observations(
+        self,
+        station_id: str,
+        start_date: str,
+        end_date: str,
+        *,
+        country: str = "US",
+        units: str = "e",
+    ) -> list[dict[str, Any]]:
+        url = self.base_url.format(
+            station_id=station_id.upper(),
+            country=str(country).upper(),
+        )
         params = {
             "apiKey": self.api_key,
-            "units": "e",
+            "units": units,
             "startDate": _parse_date(start_date).strftime("%Y%m%d"),
             "endDate": _parse_date(end_date).strftime("%Y%m%d"),
         }
@@ -156,6 +172,8 @@ def backfill_wunderground_station_history(
     *,
     stations: Iterable[str],
     station_timezones: dict[str, str],
+    station_countries: dict[str, str] | None = None,
+    station_units: dict[str, str] | None = None,
     start_date: str,
     end_date: str,
     api_key: str | None = None,
@@ -170,6 +188,8 @@ def backfill_wunderground_station_history(
 
     key = api_key or os.environ.get(api_key_env) or discover_weather_company_public_api_key()
     client = WeatherCompanyStationHistoryClient(api_key=key)
+    countries = {str(key).upper(): str(value).upper() for key, value in (station_countries or {}).items()}
+    units_by_station = {str(key).upper(): str(value).lower() for key, value in (station_units or {}).items()}
     existing = _read_existing(output_path)
     completed: set[tuple[str, str]] = set()
     if not force_refresh and not existing.empty:
@@ -184,30 +204,54 @@ def backfill_wunderground_station_history(
     requested_days = date_range(start_date, end_date)
     for station in wanted:
         timezone = station_timezones[station]
+        country = countries.get(station, "US")
+        units = units_by_station.get(station, "e")
+        if units not in {"e", "m"}:
+            raise ValueError(f"Unsupported Weather Company units for {station}: {units!r}")
         for chunk_start, chunk_end in _month_chunks(start_date, end_date):
             chunk_days = [day for day in requested_days if chunk_start <= day <= chunk_end]
             missing_days = [day for day in chunk_days if (station, day) not in completed]
             if not missing_days:
                 continue
             try:
-                observations = client.fetch_observations(station, missing_days[0], missing_days[-1])
-                daily = _station_history_daily_highs(observations, timezone)
+                observations = client.fetch_observations(
+                    station,
+                    missing_days[0],
+                    missing_days[-1],
+                    country=country,
+                    units=units,
+                )
+                daily = _station_history_daily_highs(observations, timezone, units=units)
                 fetched_at = datetime.now(UTC).isoformat()
                 for day in missing_days:
                     summary = daily.get(day)
-                    high = summary["high_f"] if summary else pd.NA
+                    high_f = summary["high_f"] if summary else pd.NA
+                    high_c = summary["high_c"] if summary else pd.NA
+                    high_native = summary["high_native"] if summary else pd.NA
                     count = int(summary["observation_count"]) if summary else 0
-                    quality_flag = "ok" if pd.notna(high) and count >= 12 else "sparse_or_unavailable"
+                    quality_flag = "ok" if pd.notna(high_native) and count >= 12 else "sparse_or_unavailable"
                     rows.append(
                         {
                             "station_id": station,
                             "contract_date": day,
-                            "settlement_high_f": high if quality_flag == "ok" else pd.NA,
+                            "settlement_high_f": high_f if quality_flag == "ok" else pd.NA,
+                            "settlement_high_c": high_c if quality_flag == "ok" else pd.NA,
+                            "settlement_unit": "C" if units == "m" else "F",
                             "settlement_source": "wunderground_station_history",
-                            "source_url": _station_history_source_url(client, station, day, day),
+                            "source_url": _station_history_source_url(
+                                client,
+                                station,
+                                day,
+                                day,
+                                country=country,
+                                units=units,
+                            ),
                             "quality_flag": quality_flag,
-                            "raw_value": high,
-                            "notes": f"observation_count={count}; timezone={timezone}",
+                            "raw_value": high_native,
+                            "notes": (
+                                f"observation_count={count}; timezone={timezone}; "
+                                f"country={country}; units={units}"
+                            ),
                             "fetched_at_utc": fetched_at,
                         }
                     )
@@ -219,6 +263,8 @@ def backfill_wunderground_station_history(
                             "station_id": station,
                             "contract_date": day,
                             "settlement_high_f": pd.NA,
+                            "settlement_high_c": pd.NA,
+                            "settlement_unit": "C" if units == "m" else "F",
                             "settlement_source": "wunderground_station_history",
                             "source_url": pd.NA,
                             "quality_flag": "unavailable",
@@ -468,6 +514,8 @@ def _month_chunks(start_date: str, end_date: str) -> list[tuple[str, str]]:
 def _station_history_daily_highs(
     observations: Iterable[dict[str, Any]],
     timezone: str,
+    *,
+    units: str = "e",
 ) -> dict[str, dict[str, float | int]]:
     tz = ZoneInfo(timezone)
     temperatures_by_day: dict[str, list[float]] = {}
@@ -478,11 +526,24 @@ def _station_history_daily_highs(
             continue
         local_day = datetime.fromtimestamp(float(timestamp), tz=UTC).astimezone(tz).date().isoformat()
         temperatures_by_day.setdefault(local_day, []).append(float(temperature))
-    return {
-        day: {"high_f": max(values), "observation_count": len(values)}
-        for day, values in temperatures_by_day.items()
-        if values
-    }
+    output: dict[str, dict[str, float | int]] = {}
+    for day, values in temperatures_by_day.items():
+        if not values:
+            continue
+        high_native = max(values)
+        if units == "m":
+            high_c = high_native
+            high_f = high_native * 9 / 5 + 32
+        else:
+            high_f = high_native
+            high_c = (high_native - 32) * 5 / 9
+        output[day] = {
+            "high_native": high_native,
+            "high_f": high_f,
+            "high_c": high_c,
+            "observation_count": len(values),
+        }
+    return output
 
 
 def _station_history_source_url(
@@ -490,10 +551,16 @@ def _station_history_source_url(
     station_id: str,
     start_date: str,
     end_date: str,
+    *,
+    country: str = "US",
+    units: str = "e",
 ) -> str:
-    base_url = client.base_url.format(station_id=station_id.upper())
+    base_url = client.base_url.format(
+        station_id=station_id.upper(),
+        country=str(country).upper(),
+    )
     return (
-        f"{base_url}?units=e&startDate={_parse_date(start_date):%Y%m%d}"
+        f"{base_url}?units={units}&startDate={_parse_date(start_date):%Y%m%d}"
         f"&endDate={_parse_date(end_date):%Y%m%d}"
     )
 
@@ -697,6 +764,17 @@ def _coerce_settlement_columns(frame: pd.DataFrame) -> pd.DataFrame:
     out["station_id"] = out["station_id"].astype(str).str.upper().str.strip()
     out["contract_date"] = pd.to_datetime(out["contract_date"], errors="coerce").dt.date.astype("string")
     out["settlement_high_f"] = pd.to_numeric(out["settlement_high_f"], errors="coerce")
+    out["settlement_high_c"] = pd.to_numeric(out["settlement_high_c"], errors="coerce")
+    missing_f = out["settlement_high_f"].isna() & out["settlement_high_c"].notna()
+    out.loc[missing_f, "settlement_high_f"] = (
+        out.loc[missing_f, "settlement_high_c"] * 9 / 5
+    ) + 32
+    missing_c = out["settlement_high_c"].isna() & out["settlement_high_f"].notna()
+    out.loc[missing_c, "settlement_high_c"] = (
+        out.loc[missing_c, "settlement_high_f"] - 32
+    ) * 5 / 9
+    out["settlement_unit"] = out["settlement_unit"].astype("string")
+    out.loc[out["settlement_unit"].isna(), "settlement_unit"] = "F"
     return out[SETTLEMENT_COLUMNS]
 
 

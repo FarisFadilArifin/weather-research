@@ -44,7 +44,27 @@ KNOWN_OFFICIAL_STATIONS = {
         "lat": 22.302,
         "lon": 114.174,
         "confidence": 0.8,
-    }
+    },
+    "incheon international airport": {
+        "station_code": "RKSI",
+        "station_name": "Incheon International Airport",
+        "airport_name": "Incheon International Airport",
+        "country": "KR",
+        "timezone": "Asia/Seoul",
+        "lat": 37.469,
+        "lon": 126.451,
+        "confidence": 0.95,
+    },
+    "tokyo haneda airport": {
+        "station_code": "RJTT",
+        "station_name": "Tokyo Haneda Airport",
+        "airport_name": "Tokyo Haneda Airport",
+        "country": "JP",
+        "timezone": "Asia/Tokyo",
+        "lat": 35.553,
+        "lon": 139.781,
+        "confidence": 0.95,
+    },
 }
 
 
@@ -276,6 +296,10 @@ def _country_from_code(code: str | None) -> str | None:
         return "CA"
     if code.startswith("MM"):
         return "MX"
+    if code.startswith("RK"):
+        return "KR"
+    if code.startswith("RJ"):
+        return "JP"
     return None
 
 

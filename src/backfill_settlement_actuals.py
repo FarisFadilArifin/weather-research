@@ -101,10 +101,21 @@ def main() -> None:
             for _, row in registry.iterrows()
             if pd.notna(row.get(station_column)) and pd.notna(row.get("timezone"))
         }
+        station_countries = {
+            str(row[station_column]).upper(): str(row["country"]).upper()
+            for _, row in registry.iterrows()
+            if pd.notna(row.get(station_column)) and pd.notna(row.get("country"))
+        }
+        station_units = {
+            station: ("e" if station_countries.get(station, "US") == "US" else "m")
+            for station in station_timezones
+        }
         frame = backfill_wunderground_station_history(
             output,
             stations=args.stations,
             station_timezones=station_timezones,
+            station_countries=station_countries,
+            station_units=station_units,
             start_date=args.start_date,
             end_date=args.end_date,
             api_key=args.api_key,

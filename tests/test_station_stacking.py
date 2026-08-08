@@ -458,6 +458,74 @@ def test_station_stacking_config_accepts_catboost_only_methods() -> None:
         StationStackingConfig(station_id="KATL", base_model_methods=("random_forest",)).effective_base_model_methods
 
 
+def test_station_stacking_config_accepts_diverse_ensemble_methods() -> None:
+    config = StationStackingConfig(
+        station_id="KDAL",
+        base_model_methods=("xgboost", "extra_trees", "ridge", "ridge"),
+    )
+
+    assert config.effective_base_model_methods == ("xgboost", "extra_trees", "ridge")
+
+
+def test_model_exporter_accepts_diverse_ensemble_methods() -> None:
+    methods = export_station_stacking_v2_models._validated_base_model_methods(
+        ("xgboost", "extra_trees", "ridge", "ridge")
+    )
+
+    assert methods == ("xgboost", "extra_trees", "ridge")
+
+
+def test_diverse_ensemble_estimators_and_search_spaces() -> None:
+    class RecordingTrial:
+        number = 0
+
+        def suggest_int(self, name, low, high):
+            return low
+
+        def suggest_float(self, name, low, high, log=False):
+            return low
+
+        def suggest_categorical(self, name, choices):
+            return tuple(choices)[0]
+
+    config = StationStackingConfig(
+        station_id="KDAL",
+        feature_version="v11_settlement_fix_temp",
+        hyperparameter_space="wide",
+    )
+    extra_params = station_stacking._suggest_hyperparameters("extra_trees", RecordingTrial(), config)
+    ridge_params = station_stacking._suggest_hyperparameters("ridge", RecordingTrial(), config)
+    extra = station_stacking._build_base_model_estimator(config, "extra_trees", extra_params)
+    ridge = station_stacking._build_base_model_estimator(config, "ridge", ridge_params)
+
+    assert extra.get_params()["n_estimators"] == 200
+    assert extra.get_params()["bootstrap"] is False
+    assert ridge.named_steps["scale"].with_mean
+    assert ridge.named_steps["ridge"].alpha == pytest.approx(1e-4)
+
+
+def test_svr_base_model_estimator_and_search_space() -> None:
+    class RecordingTrial:
+        def suggest_float(self, name, low, high, log=False):
+            return low
+
+    config = StationStackingConfig(
+        station_id="KDAL",
+        feature_version="v11_settlement_fix_temp",
+        hyperparameter_space="wide",
+        base_model_methods=("svr",),
+    )
+    params = station_stacking._suggest_hyperparameters("svr", RecordingTrial(), config)
+    estimator = station_stacking._build_base_model_estimator(config, "svr", params)
+
+    assert config.effective_base_model_methods == ("svr",)
+    assert estimator.named_steps["scale"].with_mean
+    assert estimator.named_steps["svr"].kernel == "rbf"
+    assert estimator.named_steps["svr"].C == pytest.approx(0.1)
+    assert estimator.named_steps["svr"].epsilon == pytest.approx(0.05)
+    assert estimator.named_steps["svr"].gamma == pytest.approx(1e-5)
+
+
 def test_selected_hyperparameters_can_sort_by_mae() -> None:
     tuning = pd.DataFrame(
         [
@@ -1703,6 +1771,25 @@ def test_optuna_sqlite_resume_treats_trials_as_target_total(tmp_path) -> None:
     assert len(station_stacking._study_trials(final)) == 5
 
 
+@pytest.mark.parametrize("method", ["extra_trees", "ridge"])
+def test_optuna_study_supports_diverse_base_models(tmp_path, method: str) -> None:
+    pytest.importorskip("optuna")
+    config = StationStackingConfig(
+        station_id="KDAL",
+        output_dir=tmp_path,
+        feature_version="v11_settlement_fix_temp",
+        base_model_methods=("xgboost", "extra_trees", "ridge"),
+    )
+
+    study = station_stacking._create_optuna_study(config, method)
+
+    assert study.study_name == station_stacking._optuna_study_name(
+        config,
+        stage="base",
+        method=method,
+    )
+
+
 def test_optuna_trial_checkpoint_attrs_round_trip_sqlite(tmp_path) -> None:
     pytest.importorskip("optuna")
     config = StationStackingConfig(station_id="KAUS", output_dir=tmp_path, feature_version="v6")
@@ -1751,19 +1838,20 @@ def test_optuna_trial_checkpoint_attrs_round_trip_sqlite(tmp_path) -> None:
 
 def test_station_notebook_generators_use_source_owned_feature_versions() -> None:
     root = Path(__file__).resolve().parents[1]
-    v5_source = (root / "notebooks" / "station_stacking_v5" / "generate_station_notebooks.py").read_text()
-    v6_source = (root / "notebooks" / "station_stacking_v6" / "generate_station_notebooks.py").read_text()
-    v7_source = (root / "notebooks" / "station_stacking_v7" / "generate_station_notebooks.py").read_text()
-    v8_source = (root / "notebooks" / "station_stacking_v8" / "generate_station_notebooks.py").read_text()
-    v9_source = (root / "notebooks" / "station_stacking_v9" / "generate_station_notebooks.py").read_text()
-    v10_source = (root / "notebooks" / "station_stacking_v10" / "generate_station_notebooks.py").read_text()
-    v11_source = (root / "notebooks" / "station_stacking_v11" / "generate_station_notebooks.py").read_text()
-    v12_source = (root / "notebooks" / "station_stacking_v12" / "generate_station_notebooks.py").read_text()
-    v15_source = (root / "notebooks" / "station_stacking_v15" / "generate_station_notebooks.py").read_text()
-    v16_source = (root / "notebooks" / "station_stacking_v16" / "generate_station_notebooks.py").read_text()
-    v17_source = (root / "notebooks" / "station_stacking_v17" / "generate_station_notebooks.py").read_text()
-    v18_source = (root / "notebooks" / "station_stacking_v18" / "generate_station_notebooks.py").read_text()
-    v18_katl_notebook = (root / "notebooks" / "station_stacking_v18" / "stacking_KATL_v18.ipynb").read_text()
+    experiments = root / "notebooks" / "experiments"
+    v5_source = (experiments / "station_stacking_v5" / "generate_station_notebooks.py").read_text()
+    v6_source = (experiments / "station_stacking_v6" / "generate_station_notebooks.py").read_text()
+    v7_source = (experiments / "station_stacking_v7" / "generate_station_notebooks.py").read_text()
+    v8_source = (experiments / "station_stacking_v8" / "generate_station_notebooks.py").read_text()
+    v9_source = (experiments / "station_stacking_v9" / "generate_station_notebooks.py").read_text()
+    v10_source = (experiments / "station_stacking_v10" / "generate_station_notebooks.py").read_text()
+    v11_source = (experiments / "station_stacking_v11" / "generate_station_notebooks.py").read_text()
+    v12_source = (experiments / "station_stacking_v12" / "generate_station_notebooks.py").read_text()
+    v15_source = (experiments / "station_stacking_v15" / "generate_station_notebooks.py").read_text()
+    v16_source = (experiments / "station_stacking_v16" / "generate_station_notebooks.py").read_text()
+    v17_source = (experiments / "station_stacking_v17" / "generate_station_notebooks.py").read_text()
+    v18_source = (experiments / "station_stacking_v18" / "generate_station_notebooks.py").read_text()
+    v18_katl_notebook = (experiments / "station_stacking_v18" / "stacking_KATL_v18.ipynb").read_text()
     v18_runner_source = (root / "scripts" / "run_station_stacking_v18.py").read_text()
 
     assert 'feature_version="v5"' in v5_source
@@ -3208,7 +3296,7 @@ def test_export_v18_manifest_records_ridge_stack_bucket_policy_and_wunderground_
         optuna_metric="mae_f",
         target_mode="remaining_warmup",
         target_source="wunderground_only",
-        source_pipeline="notebooks/station_stacking_v18",
+        source_pipeline="notebooks/experiments/station_stacking_v18",
     )
     bundle = joblib.load(exported.bundle_path)
     manifest = json.loads(exported.manifest_path.read_text(encoding="utf-8"))
@@ -3390,7 +3478,12 @@ def test_notebook_and_exporter_share_v20_aggregate_ridge_selection() -> None:
 
 def test_v11_settlement_fix_notebooks_are_single_arm_and_parseable() -> None:
     root = Path(__file__).resolve().parents[1]
-    notebook_root = root / "notebooks" / "station_stacking_v11_settlement_fix"
+    notebook_root = (
+        root
+        / "notebooks"
+        / "experiments"
+        / "station_stacking_v11_settlement_fix"
+    )
     generator_source = (notebook_root / "generate_station_notebooks.py").read_text(encoding="utf-8")
 
     assert 'feature_version="v11_settlement_fix_temp"' in generator_source
@@ -3573,7 +3666,9 @@ def test_v20_expanding_folds_are_chronological_and_equal_weighted() -> None:
 
 def test_v20_notebooks_are_single_arm_and_parseable() -> None:
     root = Path(__file__).resolve().parents[1]
-    notebook_root = root / "notebooks" / "station_stacking_v20_peak_timing"
+    notebook_root = (
+        root / "notebooks" / "experiments" / "station_stacking_v20_peak_timing"
+    )
     generator_source = (notebook_root / "generate_station_notebooks.py").read_text(encoding="utf-8")
     assert 'training_profile="v20_aligned"' in generator_source
     assert 'feature_version="v20_peak_timing"' in generator_source
@@ -3746,7 +3841,9 @@ def test_kdal_oof_residual_calibration_uses_only_pre_2026_stack_rows() -> None:
 
 def test_v20_kdal_fix_notebook_is_isolated_and_parseable() -> None:
     root = Path(__file__).resolve().parents[1]
-    notebook_root = root / "notebooks" / "station_stacking_v20_kdal_fix"
+    notebook_root = (
+        root / "notebooks" / "experiments" / "station_stacking_v20_kdal_fix"
+    )
     generator = (notebook_root / "generate_station_notebook.py").read_text(encoding="utf-8")
     assert 'STATION_ID = "KDAL"' in generator
     assert 'feature_version="v20_kdal_nbm_physics"' in generator

@@ -1,0 +1,5 @@
+comparison,market_unit,count,bucket_accuracy,log_loss,brier,decision_coverage,decision_accuracy,notes
+nearest_celsius_point_bucket,1C,206,0.5631067961165048,,,1.0,0.5631067961165048,deterministic point baseline
+old_mapped_fahrenheit_probabilities,mapped_to_1C_post_hoc,206,0.587378640776699,1.1139100975285319,0.5897314378132824,1.0,0.587378640776699,diagnostic only; trained on rounded-F offsets
+old_native_fahrenheit_probability_decision,native_2F,206,0.5194174757281553,,,0.529126213592233,0.5779816513761468,not a valid Tokyo 1C market filter
+new_celsius_ordinal_probabilities,1C,206,0.5436893203883495,1.1465132640167983,0.601288133279873,0.6844660194174758,0.6028368794326241,exploratory 2026 holdout; shadow-only

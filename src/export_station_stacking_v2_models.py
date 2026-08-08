@@ -19,6 +19,7 @@ from src.calibration.station_stacking import (
     REMAINING_WARMUP_TARGET,
     STACK_FEATURE_SETS,
     STACK_METHOD,
+    SUPPORTED_BASE_MODEL_METHODS,
     TARGET,
     TARGET_MODE_DIRECT_HIGH,
     TARGET_STATIONS,
@@ -47,7 +48,9 @@ DEFAULT_TRAINING_PROFILE = TRAINING_PROFILE_LEGACY
 DEFAULT_OPTUNA_METRIC = "rmse_f"
 DEFAULT_TARGET_MODE = TARGET_MODE_DIRECT_HIGH
 DEFAULT_BASE_MODEL_METHODS = tuple(BASE_MODEL_METHODS)
-DEFAULT_SOURCE_PIPELINE = "notebooks/station_stacking_v2"
+DEFAULT_SOURCE_PIPELINE = "notebooks/experiments/station_stacking_v2"
+DEFAULT_BUCKET_CONTRACT = "polymarket_half_up_2f"
+HKO_BUCKET_CONTRACT = "floor_1c"
 
 
 @dataclass(frozen=True)
@@ -77,6 +80,10 @@ def export_station_model_weights(
     feature_pipeline: str | None = None,
     selected_guarded_cap_f: float | None = None,
     baseline_comparison: dict[str, Any] | None = None,
+    max_feature_missing_fraction: float | None = None,
+    bucket_contract: str = DEFAULT_BUCKET_CONTRACT,
+    observation_target_same_station: bool = True,
+    observation_source: str = "default",
     city_id: str | None = None,
 ) -> ExportedModelWeights:
     root = Path(project_root).resolve()
@@ -108,6 +115,9 @@ def export_station_model_weights(
         target_source=target_source,
         base_model_methods=methods,
         stack_enabled=stack_enabled,
+        max_feature_missing_fraction=max_feature_missing_fraction,
+        observation_target_same_station=observation_target_same_station,
+        observation_source=observation_source,
     )
     modeling_frame, categorical, numeric = _modeling_frame(features, config)
     if modeling_frame.empty:
@@ -126,7 +136,12 @@ def export_station_model_weights(
     if train.empty:
         raise ValueError(f"No training rows available for {station} in requested year range.")
 
-    fit_categorical, fit_numeric = _fit_feature_columns(train, categorical, numeric)
+    fit_categorical, fit_numeric = _fit_feature_columns(
+        train,
+        categorical,
+        numeric,
+        max_missing_fraction=config.effective_max_feature_missing_fraction,
+    )
     feature_names = [*fit_categorical, *fit_numeric]
     if not feature_names:
         raise ValueError(f"No non-empty feature columns available for {station}.")
@@ -172,13 +187,27 @@ def export_station_model_weights(
     else:
         stack_model, stack_manifest = None, _disabled_stack_manifest()
         final_model_method = methods[0]
+    normalized_bucket_contract = _validated_bucket_contract(bucket_contract)
     residual_calibrator = (
         _ridge_residual_calibrator(validation_predictions, stack_model, stack_manifest["features"], methods)
         if stack_enabled
         else _empty_residual_calibrator()
     )
-    bucket_probability_policy = _bucket_probability_policy(residual_calibrator)
+    residual_calibrator["error_mean_c"] = float(residual_calibrator["error_mean_f"]) * 5.0 / 9.0
+    residual_calibrator["error_std_c"] = float(residual_calibrator["error_std_f"]) * 5.0 / 9.0
+    bucket_probability_policy = _bucket_probability_policy(residual_calibrator, normalized_bucket_contract)
+    if normalized_bucket_contract == HKO_BUCKET_CONTRACT:
+        for item in base_model_manifests:
+            item["mean_validation_bucket_log_loss"] = None
+            item["bucket_metric_contract"] = HKO_BUCKET_CONTRACT
+        stack_manifest["validation_bucket_log_loss"] = None
+        stack_manifest["bucket_metric_contract"] = HKO_BUCKET_CONTRACT
 
+    training_population_required_features = (
+        [f"{provider}_forecast_temp_at_as_of_f" for provider in config.providers]
+        if config.effective_training_profile != TRAINING_PROFILE_LEGACY
+        else []
+    )
     bundle = {
         "schema_version": 1,
         "model_version": model_version,
@@ -189,6 +218,8 @@ def export_station_model_weights(
         "target_source": config.effective_target_source,
         "model_target": _model_target_column(config),
         "observed_high_so_far_column": OBSERVED_HIGH_SO_FAR_COLUMN,
+        "observation_target_same_station": config.observation_target_same_station,
+        "observation_source": config.observation_source,
         "training_mode": training_mode,
         "base_model_methods": tuple(methods),
         "stack_enabled": bool(stack_enabled),
@@ -203,8 +234,11 @@ def export_station_model_weights(
         "timing_mode": config.timing_mode,
         "feature_version": config.effective_feature_version,
         "training_profile": config.effective_training_profile,
+        "training_population_required_features": training_population_required_features,
+        "max_feature_missing_fraction": config.effective_max_feature_missing_fraction,
         "optuna_metric": config.effective_optuna_metric,
         "bucket_probability_policy": bucket_probability_policy,
+        "bucket_contract": normalized_bucket_contract,
         "residual_calibrator": residual_calibrator,
     }
 
@@ -242,13 +276,19 @@ def export_station_model_weights(
             "providers": list(config.providers),
             "feature_version": config.effective_feature_version,
             "training_profile": config.effective_training_profile,
+            "training_population_required_features": training_population_required_features,
+            "max_feature_missing_fraction": config.effective_max_feature_missing_fraction,
             "optuna_metric": config.effective_optuna_metric,
             "target_mode": config.effective_target_mode,
             "target_source": config.effective_target_source,
+            "observation_target_same_station": config.observation_target_same_station,
+            "observation_source": config.observation_source,
+            "training_population_required_features": training_population_required_features,
             "model_target": _model_target_column(config),
             "base_model_methods": list(methods),
             "stack_enabled": bool(stack_enabled),
             "final_model_method": final_model_method,
+            "bucket_contract": normalized_bucket_contract,
         },
         "training": {
             "mode": training_mode,
@@ -346,7 +386,6 @@ def export_all_station_model_weights(
     feature_pipeline: str | None = None,
     selected_guarded_cap_f: float | None = None,
     baseline_comparison: dict[str, Any] | None = None,
-    city_id: str | None = None,
 ) -> list[ExportedModelWeights]:
     exports = [
         export_station_model_weights(
@@ -369,7 +408,6 @@ def export_all_station_model_weights(
             feature_pipeline=feature_pipeline,
             selected_guarded_cap_f=selected_guarded_cap_f,
             baseline_comparison=baseline_comparison,
-            city_id=city_id,
         )
         for station in stations
     ]
@@ -458,7 +496,7 @@ def _ridge_residual_calibrator(
 ) -> dict[str, Any]:
     if validation_predictions.empty or stack_model is None or not stack_features:
         return _empty_residual_calibrator()
-    stack_methods = [*base_model_methods, "hrrr_raw", "gfs_raw"]
+    stack_methods = [feature.removesuffix("_predicted_high_f") for feature in stack_features]
     source = _year_split_stack_source_frame(validation_predictions, stack_methods)
     if source.empty or any(column not in source for column in stack_features):
         return _empty_residual_calibrator()
@@ -497,15 +535,45 @@ def _empty_residual_calibrator() -> dict[str, Any]:
     }
 
 
-def _bucket_probability_policy(residual_calibrator: dict[str, Any]) -> dict[str, Any]:
+def _bucket_probability_policy(
+    residual_calibrator: dict[str, Any],
+    bucket_contract: str = DEFAULT_BUCKET_CONTRACT,
+) -> dict[str, Any]:
+    if bucket_contract == HKO_BUCKET_CONTRACT:
+        return {
+            "enabled": True,
+            "method": "normal_residual_interval_probability",
+            "bucket_rounding": HKO_BUCKET_CONTRACT,
+            "bucket_unit": "celsius",
+            "bucket_width_c": 1.0,
+            "bucket_interval": "[n,n+1)",
+            "point_bucket": "floor(predictedHighC)",
+            "two_bucket_selection": "[floor(predictedHighC)-1,floor(predictedHighC)]",
+            "continuity_correction_c": 0.5,
+            "continuity_correction_f": 0.9,
+            "prediction_conversion": "predictedHighC=(predictedHighF-32)*5/9",
+            "residual_calibrator_method": residual_calibrator.get("method", STACK_METHOD),
+            "live_output": "bucketProbabilities",
+        }
     return {
         "enabled": True,
         "method": "normal_residual_interval_probability",
-        "bucket_rounding": "polymarket_half_up_2f",
+        "bucket_rounding": DEFAULT_BUCKET_CONTRACT,
+        "bucket_unit": "fahrenheit",
+        "bucket_width_f": 2.0,
         "continuity_correction_f": 0.5,
         "residual_calibrator_method": residual_calibrator.get("method", STACK_METHOD),
         "live_output": "bucketProbabilities",
     }
+
+
+def _validated_bucket_contract(value: str) -> str:
+    contract = str(value or DEFAULT_BUCKET_CONTRACT).strip().lower()
+    if contract not in {DEFAULT_BUCKET_CONTRACT, HKO_BUCKET_CONTRACT}:
+        raise ValueError(
+            f"bucket_contract must be '{DEFAULT_BUCKET_CONTRACT}' or '{HKO_BUCKET_CONTRACT}'"
+        )
+    return contract
 
 
 def _read_required_csv(path: Path) -> pd.DataFrame:
@@ -537,6 +605,8 @@ def _sha256_file(path: Path) -> str:
 def _feature_pipeline_name(feature_version: str) -> str:
     if feature_version == "v20_peak_timing":
         return "station_stacking_v20_peak_timing"
+    if feature_version == "v20_hko_gfs_no_peak":
+        return "station_stacking_v20_hko_no_peak"
     if feature_version == "v11_settlement_fix_temp":
         return "station_stacking_v11_settlement_fix"
     if feature_version.startswith("v11"):
@@ -585,8 +655,11 @@ def _validated_base_model_methods(methods: tuple[str, ...]) -> tuple[str, ...]:
         method = str(raw_method).strip().lower()
         if not method:
             continue
-        if method not in BASE_MODEL_METHODS:
-            raise ValueError(f"base_model_methods must be drawn from: {', '.join(BASE_MODEL_METHODS)}")
+        if method not in SUPPORTED_BASE_MODEL_METHODS:
+            raise ValueError(
+                "base_model_methods must be drawn from: "
+                f"{', '.join(SUPPORTED_BASE_MODEL_METHODS)}"
+            )
         if method not in validated:
             validated.append(method)
     if not validated:
@@ -610,6 +683,8 @@ def _point_in_time_rule(config: StationStackingConfig) -> str:
 def _base_prediction_transform(config: StationStackingConfig) -> str:
     if config.effective_target_mode == TARGET_MODE_DIRECT_HIGH:
         return "identity"
+    if not config.observation_target_same_station:
+        return f"predicted_high_f={OBSERVED_HIGH_SO_FAR_COLUMN}+model_output"
     return f"predicted_high_f=max({OBSERVED_HIGH_SO_FAR_COLUMN}, {OBSERVED_HIGH_SO_FAR_COLUMN}+model_output)"
 
 

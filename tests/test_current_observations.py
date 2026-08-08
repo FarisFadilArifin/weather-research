@@ -144,6 +144,35 @@ def test_current_observation_9am_writes_unavailable_when_window_is_empty() -> No
     assert pd.isna(out[0]["observed_high_temp_through_as_of_f"])
 
 
+def test_current_observation_1pm_uses_1250_to_1310_window_and_11am_deltas() -> None:
+    rows = [
+        {"station_code": "DAL", "observed_at": "2026-06-15T15:55:00Z", "source": "iem", "temp_f": 80.0},
+        {"station_code": "DAL", "observed_at": "2026-06-15T16:05:00Z", "source": "iem", "temp_f": 82.0},
+        {"station_code": "DAL", "observed_at": "2026-06-15T17:49:00Z", "source": "iem", "temp_f": 85.0},
+        {"station_code": "DAL", "observed_at": "2026-06-15T17:55:00Z", "source": "iem", "temp_f": 88.0},
+        {"station_code": "DAL", "observed_at": "2026-06-15T18:08:00Z", "source": "iem", "temp_f": 90.0},
+        {"station_code": "DAL", "observed_at": "2026-06-15T18:11:00Z", "source": "iem", "temp_f": 99.0},
+    ]
+    out = summarize_current_observations(
+        rows,
+        station_id="KDAL",
+        station_name="Dallas Love Field",
+        airport_name="Dallas Love Field",
+        timezone="America/Chicago",
+        contract_dates=["2026-06-15"],
+        timing_mode="same_day_1pm_live_safe",
+        as_of_hour_local=13,
+    )
+    row = out[0]
+    assert row["observed_fetch_status"] == "ok"
+    assert row["observed_temp_at_as_of_f"] == 90.0
+    assert row["observed_high_temp_through_as_of_f"] == 90.0
+    assert row["observed_as_of_time_local"] == "2026-06-15T13:08:00-05:00"
+    assert row["observed_as_of_age_minutes"] == -8.0
+    assert row["observed_temp_change_since_11am_f"] == 10.0
+    assert row["observed_high_so_far_change_since_11am_f"] == 10.0
+
+
 def test_current_observation_trends_are_missing_without_history() -> None:
     out = summarize_current_observations(
         [

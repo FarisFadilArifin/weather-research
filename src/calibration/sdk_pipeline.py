@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -151,12 +152,14 @@ TIMING_MODE_FRESH_AFTER_6AM = "fresh_after_6am"
 TIMING_MODE_SAME_DAY_11AM = "same_day_11am"
 TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE = "same_day_11am_live_safe"
 TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE = "same_day_9am_live_safe"
+TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE = "same_day_1pm_live_safe"
 TIMING_MODES = [
     TIMING_MODE_STRICT_6AM,
     TIMING_MODE_FRESH_AFTER_6AM,
     TIMING_MODE_SAME_DAY_11AM,
     TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE,
     TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE,
+    TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE,
 ]
 TIMING_MODE_SOURCE_LABELS = {
     TIMING_MODE_STRICT_6AM: "strict_6am",
@@ -164,10 +167,12 @@ TIMING_MODE_SOURCE_LABELS = {
     TIMING_MODE_SAME_DAY_11AM: "same_day_11am_remaining_day",
     TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE: "same_day_11am_live_safe_remaining_day",
     TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE: "same_day_9am_live_safe_remaining_day",
+    TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE: "same_day_1pm_live_safe_remaining_day",
 }
 LIVE_SAFE_TIMING_LOCAL_HOURS = {
     TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE: 11,
     TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE: 9,
+    TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE: 13,
 }
 LIVE_SAFE_DECISION_DELAY_MINUTES = 15
 LIVE_SAFE_MODEL_LAG_MINUTES = {"hrrr": 75, "gfs": 270, "nbm": 120}
@@ -250,6 +255,8 @@ def forecast_as_of_for_timing(contract_date: str | date, timezone: str, timing_m
         return local_datetime_utc(contract_date, timezone, 11)
     if timing_mode == TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE:
         return local_datetime_utc(contract_date, timezone, 9)
+    if timing_mode == TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE:
+        return local_datetime_utc(contract_date, timezone, 13)
     if timing_mode == TIMING_MODE_STRICT_6AM:
         return forecast_as_of_utc(contract_date, timezone)
     raise ValueError(f"Unsupported timing_mode: {timing_mode}")
@@ -267,6 +274,7 @@ def forecast_window_for_timing(
         TIMING_MODE_SAME_DAY_11AM,
         TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE,
         TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE,
+        TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE,
     }:
         return forecast_as_of.astimezone(UTC), end_utc
     if timing_mode == TIMING_MODE_STRICT_6AM:
@@ -389,6 +397,30 @@ def choose_same_day_9am_live_safe_cycle(
         timezone,
         TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE,
     )
+
+
+def choose_same_day_1pm_live_safe_cycle(
+    model: str,
+    contract_date: str,
+    timezone: str,
+) -> tuple[datetime | None, tuple[int, ...], datetime, datetime, datetime]:
+    return choose_same_day_live_safe_cycle(
+        model,
+        contract_date,
+        timezone,
+        TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE,
+    )
+
+
+def choose_direct_nbm_latest_live_safe_cycle(
+    contract_date: str,
+    timezone: str,
+    timing_mode: str,
+) -> tuple[datetime | None, tuple[int, ...], datetime, datetime, datetime]:
+    """Select the latest hourly NBM cycle available by the live-safe decision time."""
+    if timing_mode not in LIVE_SAFE_TIMING_LOCAL_HOURS:
+        raise ValueError(f"Unsupported live-safe timing_mode: {timing_mode}")
+    return choose_same_day_live_safe_cycle("nbm", contract_date, timezone, timing_mode)
 
 
 def choose_direct_nbm_13z_live_safe_cycle(
@@ -734,8 +766,13 @@ def backfill_direct_nbm(
     timing_mode: str = TIMING_MODE_SAME_DAY_11AM,
     include_weather_features: bool = False,
 ) -> pd.DataFrame:
-    if timing_mode not in {TIMING_MODE_SAME_DAY_11AM, TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE}:
-        raise ValueError("Direct NOAA NBM supports timing_mode='same_day_11am' or 'same_day_11am_live_safe'")
+    supported = {
+        TIMING_MODE_SAME_DAY_11AM,
+        TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE,
+        TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE,
+    }
+    if timing_mode not in supported:
+        raise ValueError(f"Direct NOAA NBM supports timing modes {sorted(supported)}")
     out_dir = Path(cache_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     station_meta = write_station_registry(out_dir, stations)
@@ -892,6 +929,13 @@ def plan_direct_nbm_requests(
                     timezone,
                 )
                 cycle_selection_policy = "direct_noaa_nbm_13z_cycle_available_by_1115_local_with_120min_buffer"
+            elif timing_mode == TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE:
+                cycle, fxx_hours, as_of, window_start, window_end = choose_direct_nbm_latest_live_safe_cycle(
+                    contract_date,
+                    timezone,
+                    timing_mode,
+                )
+                cycle_selection_policy = "direct_noaa_latest_nbm_cycle_available_by_1315_local_with_120min_lag"
             else:
                 as_of = forecast_as_of_for_timing(contract_date, timezone, timing_mode)
                 window_start, window_end = forecast_window_for_timing(contract_date, timezone, timing_mode, as_of)
@@ -1314,6 +1358,7 @@ def _patch_mostlyright_nwp_variables() -> None:
     except Exception:
         module = None
     if module is not None:
+        _patch_mostlyright_windows_eccodes_thread_safety()
         modules = module.get_variable_map.__globals__.get("_MODULES", {})
         variable_map = getattr(modules.get("nbm"), "VARIABLE_MAP", None)
         if isinstance(variable_map, dict):
@@ -1329,6 +1374,56 @@ def _patch_mostlyright_nwp_variables() -> None:
 
     for variable_map in patched_maps:
         _patch_nbm_variable_map(variable_map, enable_wind=enable_nbm_wind)
+
+
+def _patch_mostlyright_windows_eccodes_thread_safety() -> None:
+    """Use ecCodes nearest-point decoding without thread-unsafe cfgrib opens."""
+    if os.name != "nt":
+        return
+    try:
+        extract = importlib.import_module("mostlyright.weather._fetchers._nwp_extract")
+    except Exception:
+        return
+    original = getattr(extract, "open_grib2_dataset", None)
+    if original is None or getattr(original, "_weather_research_nearest", False):
+        return
+    decode_lock = threading.Lock()
+
+    class _NearestPointDataset:
+        def __init__(self, path: str):
+            self.path = path
+            # forecast_nwp accepts the only data variable as a fallback name.
+            self.data_vars = {"value": None}
+
+        def close(self) -> None:
+            return None
+
+    def _open_grib2_dataset_nearest(path: str):
+        return _NearestPointDataset(path)
+
+    def _extract_stations_nearest(dataset, *, variable: str, station_coords):
+        del variable
+        from eccodes import codes_grib_find_nearest, codes_grib_new_from_file, codes_release
+
+        results: list[tuple[float, float]] = []
+        # The Windows MEMFS definitions parser is not thread-safe, so only the
+        # very short ecCodes parse/sample section is serialized. HTTP byte-range
+        # downloads remain concurrent in Mostly Right's worker pool.
+        with decode_lock, open(dataset.path, "rb") as stream:
+            grib_id = codes_grib_new_from_file(stream)
+            if grib_id is None:
+                raise RuntimeError(f"No GRIB message found in {dataset.path}")
+            try:
+                for latitude, longitude in station_coords:
+                    nearest = codes_grib_find_nearest(grib_id, float(latitude), float(longitude), npoints=1)[0]
+                    results.append((float(nearest.value), float(nearest.distance)))
+            finally:
+                codes_release(grib_id)
+        return results
+
+    _open_grib2_dataset_nearest._weather_research_nearest = True
+    extract.open_grib2_dataset = _open_grib2_dataset_nearest
+    extract.extract_stations = _extract_stations_nearest
 
 
 def _patch_nbm_variable_map(variable_map: dict[str, Any], enable_wind: bool = False) -> None:

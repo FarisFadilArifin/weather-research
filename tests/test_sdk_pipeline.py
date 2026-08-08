@@ -366,6 +366,45 @@ def test_same_day_9am_live_safe_forecast_as_of_handles_winter_offsets() -> None:
         assert len(sdk_pipeline.forecast_hours_for_utc_window(as_of, start, end)) == 15
 
 
+def test_same_day_1pm_live_safe_kdal_cycle_selection_handles_dst(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sdk_pipeline,
+        "model_cycle_hours",
+        lambda model: (0, 6, 12, 18) if model == "gfs" else tuple(range(24)),
+    )
+    cases = [
+        ("2026-01-15", datetime(2026, 1, 15, 19, tzinfo=UTC), {"hrrr": (18, 1), "gfs": (12, 7), "nbm": (17, 2)}),
+        ("2026-06-15", datetime(2026, 6, 15, 18, tzinfo=UTC), {"hrrr": (17, 1), "gfs": (12, 6), "nbm": (16, 2)}),
+        ("2026-03-08", datetime(2026, 3, 8, 18, tzinfo=UTC), {"hrrr": (17, 1), "gfs": (12, 6), "nbm": (16, 2)}),
+        ("2026-11-01", datetime(2026, 11, 1, 19, tzinfo=UTC), {"hrrr": (18, 1), "gfs": (12, 7), "nbm": (17, 2)}),
+    ]
+    for contract_date, expected_as_of, expected in cases:
+        for model, (cycle_hour, min_fxx) in expected.items():
+            cycle, fxx, as_of, start, end = sdk_pipeline.choose_same_day_1pm_live_safe_cycle(
+                model, contract_date, "America/Chicago"
+            )
+            assert as_of == expected_as_of
+            assert start == expected_as_of
+            assert cycle == expected_as_of.replace(hour=cycle_hour)
+            assert min(fxx) == min_fxx
+            assert len(fxx) == 11
+            assert cycle + timedelta(hours=min(fxx)) == as_of
+            assert cycle + timedelta(hours=max(fxx)) < end
+
+
+def test_direct_nbm_1pm_uses_latest_live_safe_cycle(monkeypatch) -> None:
+    monkeypatch.setattr(sdk_pipeline, "model_cycle_hours", lambda model: tuple(range(24)))
+    summer = sdk_pipeline.choose_direct_nbm_latest_live_safe_cycle(
+        "2026-06-15", "America/Chicago", sdk_pipeline.TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE
+    )
+    winter = sdk_pipeline.choose_direct_nbm_latest_live_safe_cycle(
+        "2026-01-15", "America/Chicago", sdk_pipeline.TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE
+    )
+    assert summer[0] == datetime(2026, 6, 15, 16, tzinfo=UTC)
+    assert winter[0] == datetime(2026, 1, 15, 17, tzinfo=UTC)
+    assert min(summer[1]) == min(winter[1]) == 2
+
+
 def test_same_day_11am_window_excludes_pre_11am_hours(monkeypatch) -> None:
     monkeypatch.setattr(sdk_pipeline, "model_cycle_hours", lambda model: tuple(range(24)))
     as_of = sdk_pipeline.forecast_as_of_for_timing("2026-07-15", "America/New_York", "same_day_11am")

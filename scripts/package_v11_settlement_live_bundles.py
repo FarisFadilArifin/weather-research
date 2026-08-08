@@ -21,7 +21,7 @@ import joblib
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BOT_ROOT = Path(r"D:\dev\polymarket-weather-prediction")
 MODEL_VERSION = "station_high_regressor_v11_wunderground_settlement_stack"
-SOURCE_PIPELINE = "notebooks/station_stacking_v11_settlement"
+SOURCE_PIPELINE = "notebooks/experiments/station_stacking_v11_settlement"
 FEATURE_PIPELINE = "station_stacking_v11"
 TARGET_SOURCE = "settlement_first"
 STATIONS = ("KATL", "KDAL", "KHOU", "KSEA")

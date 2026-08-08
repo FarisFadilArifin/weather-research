@@ -6,7 +6,12 @@ from pathlib import Path
 
 def test_v20_kdal_no_peak_notebook_matches_v20_contract_and_exports() -> None:
     root = Path(__file__).resolve().parents[1]
-    notebook_root = root / "notebooks" / "station_stacking_v20_kdal_no_peak"
+    notebook_root = (
+        root
+        / "notebooks"
+        / "experiments"
+        / "station_stacking_v20_kdal_no_peak"
+    )
     generator = (notebook_root / "generate_station_notebook.py").read_text(encoding="utf-8")
 
     assert 'STATION_ID = "KDAL"' in generator
@@ -33,7 +38,7 @@ def test_v20_kdal_no_peak_notebook_matches_v20_contract_and_exports() -> None:
     assert "EXPORT_MODEL_WEIGHTS = True" in source
     assert "EXPORT_MODEL_WEIGHTS = False" not in source
     assert "station_high_regressor_v20_kdal_no_peak_stack" in source
-    assert 'source_pipeline="notebooks/station_stacking_v20_kdal_no_peak"' in source
+    assert 'source_pipeline="notebooks/experiments/station_stacking_v20_kdal_no_peak"' in source
     assert '"station_stacking_v20_kdal_no_peak"' in source
     assert "export_station_model_weights(" in source
     assert "training_profile=config.effective_training_profile" in source

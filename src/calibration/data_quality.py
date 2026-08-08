@@ -14,7 +14,12 @@ MAX_PLAUSIBLE_TEMP_F = 140.0
 MAX_CURRENT_OBSERVATION_AGE_MINUTES = 20.0
 
 
-def add_strict_quality_flags(frame: pd.DataFrame, providers: Iterable[str] | None = None) -> pd.DataFrame:
+def add_strict_quality_flags(
+    frame: pd.DataFrame,
+    providers: Iterable[str] | None = None,
+    *,
+    compare_observation_to_actual: bool = True,
+) -> pd.DataFrame:
     """Annotate rows that should be excluded from strict training/evaluation."""
     out = frame.copy()
     if out.empty:
@@ -52,14 +57,14 @@ def add_strict_quality_flags(frame: pd.DataFrame, providers: Iterable[str] | Non
     if "observed_temp_at_as_of_f" in out:
         issues["observed_ok_missing_temp"] = status_ok & observed_temp.isna()
         issues["observed_temp_out_of_range"] = observed_temp.notna() & ~_plausible_temperature(observed_temp)
-        if "actual_high_f" in out:
+        if compare_observation_to_actual and "actual_high_f" in out:
             issues["observed_temp_above_actual_high"] = observed_temp.notna() & actual_high.notna() & observed_temp.gt(actual_high)
 
     observed_high = _numeric(out, "observed_high_temp_through_as_of_f")
     if "observed_high_temp_through_as_of_f" in out:
         issues["observed_ok_missing_high_so_far"] = status_ok & observed_high.isna()
         issues["observed_high_out_of_range"] = observed_high.notna() & ~_plausible_temperature(observed_high)
-        if "actual_high_f" in out:
+        if compare_observation_to_actual and "actual_high_f" in out:
             issues["actual_below_observed_high_so_far"] = (
                 observed_high.notna() & actual_high.notna() & actual_high.lt(observed_high)
             )

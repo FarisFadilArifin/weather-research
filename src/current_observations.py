@@ -16,6 +16,7 @@ from .calibration.sdk_pipeline import (
     TARGET_STATIONS,
     TIMING_MODE_SAME_DAY_11AM,
     TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE,
+    TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE,
     date_range,
     local_datetime_utc,
     resolve_contract_end,
@@ -24,11 +25,13 @@ from .calibration.sdk_pipeline import (
 
 CURRENT_OBSERVATIONS_FILE = "sdk_current_observations_11am.csv"
 CURRENT_OBSERVATIONS_9AM_FILE = "sdk_current_observations_9am.csv"
+CURRENT_OBSERVATIONS_1PM_FILE = "sdk_current_observations_1pm.csv"
 
 CACHE_KEYS = ["station_id", "contract_date", "timing_mode"]
 SUPPORTED_CURRENT_OBSERVATION_TIMING_MODES = {
     TIMING_MODE_SAME_DAY_11AM,
     TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE,
+    TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE,
 }
 
 
@@ -51,10 +54,13 @@ def backfill_sdk_current_observations(
 ) -> pd.DataFrame:
     if timing_mode not in SUPPORTED_CURRENT_OBSERVATION_TIMING_MODES:
         raise ValueError(
-            "Current observation features support timing_mode='same_day_11am' "
-            "or 'same_day_9am_live_safe' only"
+            f"Current observation features support timing modes "
+            f"{sorted(SUPPORTED_CURRENT_OBSERVATION_TIMING_MODES)}"
         )
-    expected_as_of_hour = 9 if timing_mode == TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE else 11
+    expected_as_of_hour = {
+        TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE: 9,
+        TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE: 13,
+    }.get(timing_mode, 11)
     if int(as_of_hour_local) != expected_as_of_hour:
         raise ValueError(
             f"{timing_mode!r} requires as_of_hour_local={expected_as_of_hour}; "
@@ -147,6 +153,8 @@ def backfill_sdk_current_observations(
 
 
 def current_observation_cache_file(timing_mode: str, as_of_hour_local: int) -> str:
+    if timing_mode == TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE or int(as_of_hour_local) == 13:
+        return CURRENT_OBSERVATIONS_1PM_FILE
     if timing_mode == TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE or int(as_of_hour_local) == 9:
         return CURRENT_OBSERVATIONS_9AM_FILE
     return CURRENT_OBSERVATIONS_FILE
@@ -355,7 +363,7 @@ def summarize_current_observation_for_date(
 
 
 def _uses_observation_window(timing_mode: str) -> bool:
-    return timing_mode == TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE
+    return timing_mode in {TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE, TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE}
 
 
 def _observation_window_utc(
@@ -409,6 +417,8 @@ def unavailable_current_observation_row(
         "observed_temp_change_last_3h_f": pd.NA,
         "observed_morning_warmup_rate_f_per_hour": pd.NA,
         "observed_high_so_far_change_since_9am_f": pd.NA,
+        "observed_temp_change_since_11am_f": pd.NA,
+        "observed_high_so_far_change_since_11am_f": pd.NA,
         "observed_as_of_time_local": pd.NA,
         "observed_as_of_time_utc": as_of_utc.isoformat().replace("+00:00", "Z"),
         "observed_as_of_age_minutes": pd.NA,
@@ -492,13 +502,18 @@ def _morning_temperature_trend_features(frame: pd.DataFrame, selected_row: pd.Se
             "observed_temp_change_last_3h_f": pd.NA,
             "observed_morning_warmup_rate_f_per_hour": pd.NA,
             "observed_high_so_far_change_since_9am_f": pd.NA,
+            "observed_temp_change_since_11am_f": pd.NA,
+            "observed_high_so_far_change_since_11am_f": pd.NA,
         }
 
     temp_last_1h = _temp_at_or_before(frame, observed_at_local - timedelta(hours=1))
     temp_last_3h = _temp_at_or_before(frame, observed_at_local - timedelta(hours=3))
     nine_am = observed_at_local.normalize().replace(hour=9)
+    eleven_am = observed_at_local.normalize().replace(hour=11)
     temp_at_9am = _temp_at_or_before(frame, nine_am)
+    temp_at_11am = _temp_at_or_before(frame, eleven_am)
     high_so_far_at_9am = _high_temp_at_or_before(frame, nine_am)
+    high_so_far_at_11am = _high_temp_at_or_before(frame, eleven_am)
     high_so_far_now = _max_number(
         frame.loc[frame["observed_at_local"] <= observed_at_local, "temp_f"]
     )
@@ -512,11 +527,17 @@ def _morning_temperature_trend_features(frame: pd.DataFrame, selected_row: pd.Se
     if not pd.isna(high_so_far_now) and not pd.isna(high_so_far_at_9am):
         high_so_far_change = float(high_so_far_now) - float(high_so_far_at_9am)
 
+    high_so_far_change_since_11am = pd.NA
+    if not pd.isna(high_so_far_now) and not pd.isna(high_so_far_at_11am):
+        high_so_far_change_since_11am = float(high_so_far_now) - float(high_so_far_at_11am)
+
     return {
         "observed_temp_change_last_1h_f": _difference(temp_now, temp_last_1h),
         "observed_temp_change_last_3h_f": _difference(temp_now, temp_last_3h),
         "observed_morning_warmup_rate_f_per_hour": morning_warmup_rate,
         "observed_high_so_far_change_since_9am_f": high_so_far_change,
+        "observed_temp_change_since_11am_f": _difference(temp_now, temp_at_11am),
+        "observed_high_so_far_change_since_11am_f": high_so_far_change_since_11am,
     }
 
 

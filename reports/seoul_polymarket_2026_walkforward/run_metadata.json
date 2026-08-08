@@ -1,0 +1,38 @@
+{
+  "base_execution_penalty_cents": 1,
+  "clob_price_history_api": "https://clob.polymarket.com/prices-history",
+  "decision_time_local": "11:15 Asia/Seoul",
+  "event_cache_sha256": "c33773875499493078104260bb5b59c6604c1e60ca2d2cc2b1835d242d44e6c9",
+  "feature_sha256": "f29435aaef1248f1cc434ef40ee70e0d03184cae17adfd556410800532bff176",
+  "gamma_api": "https://gamma-api.polymarket.com/events",
+  "median_filter_is_hindsight_diagnostic": true,
+  "median_filter_parameters": {
+    "max_price": 0.8,
+    "max_provider_spread": 6.0,
+    "min_edge": 0.0
+  },
+  "outputs_sha256": {
+    "REPORT.md": "3826cc5ecf2f9d537deba8125c26c2d272ed4a8c4d7bd56edcd8ae365348d704",
+    "RKSI_2026_median_filter_monthly_results.csv": "bf5a16b0a905977e4fbbfbd0a1e3cef9333021cddde5ea441ad8889d1de870d3",
+    "RKSI_2026_median_filter_price_cap_sensitivity.csv": "7d1d3c0a1d4a99767515605ff70dd9d16605ef4e1e37b3baa955d01feb62042c",
+    "RKSI_2026_median_filter_trades.csv": "8f4e98518205a017633466a497c3e0f30a083e2ee8f2cecd66d4086791fb30d9",
+    "RKSI_2026_polymarket_daily_frame.csv": "c89f3565164dbd8565a8fd7b8b520b77e70f2b77f7604725b62890ac3467915e",
+    "RKSI_2026_slippage_sensitivity.csv": "363f7b5bdc28e243c636193d44fa01710656a3844a23b2f4c4aff052c013c7ee",
+    "RKSI_2026_walkforward_family_summary.csv": "c549740f325006e90e37582bb43777b3baba9e2be07a124dc14d42e71a5c5934",
+    "RKSI_2026_walkforward_fold_results.csv": "4e5ed0495f4a4c8ee69437973a979de43b0209b2c093d2c9694e8f484aebca9c",
+    "RKSI_2026_walkforward_trades.csv": "029090d9c0eec47afb56872232061399972863f3a52714198d4ad588e4a46c96"
+  },
+  "prediction_sha256": "cbebb18385f19bcabaaa7ccff84ad6b9a1508fe48a5ec64f4bac7ea050935b42",
+  "risk_per_trade_usdc": 4.0,
+  "robust_positive_filter_exists": false,
+  "selection_excludes_current_fold": true,
+  "sizing_policy": {
+    "base_loss_usdc": 4.0,
+    "high_edge_threshold": 0.15,
+    "high_loss_usdc": 6.0
+  },
+  "source_notebook": "notebooks/station_training_baseline/stations/Seoul/train_Seoul.ipynb",
+  "station_id": "RKSI",
+  "walk_forward_contract": "previous_calendar_month_selects_next_calendar_month",
+  "winner": "probability_provider_spread_edge_price_cap"
+}

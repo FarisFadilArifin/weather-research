@@ -156,6 +156,37 @@ def test_station_history_client_requests_airport_history(monkeypatch) -> None:
     assert captured["params"]["apiKey"] == "test-key"
 
 
+def test_station_history_client_supports_international_metric_station(monkeypatch) -> None:
+    captured = {}
+
+    class FakeResponse:
+        url = "https://api.weather.com/v1/location/RKSI:9:KR/observations/historical.json"
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"observations": [{"valid_time_gmt": 1, "temp": 30}]}
+
+    def fake_get(url, params, timeout):
+        captured.update({"url": url, "params": params, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr("src.settlement_actuals.requests.get", fake_get)
+    client = WeatherCompanyStationHistoryClient(api_key="test-key")
+    observations = client.fetch_observations(
+        "rksi",
+        "2026-04-01",
+        "2026-04-30",
+        country="KR",
+        units="m",
+    )
+
+    assert observations[0]["temp"] == 30
+    assert captured["url"].endswith("/RKSI:9:KR/observations/historical.json")
+    assert captured["params"]["units"] == "m"
+
+
 def test_wunderground_station_history_has_priority_over_fallback() -> None:
     assert SOURCE_PRIORITY["wunderground_station_history"] > SOURCE_PRIORITY["iem_fallback"]
     assert _month_chunks("2026-01-30", "2026-03-02") == [

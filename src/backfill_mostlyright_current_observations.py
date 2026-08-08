@@ -3,7 +3,12 @@ from __future__ import annotations
 import argparse
 import logging
 
-from .calibration.sdk_pipeline import TARGET_STATIONS, TIMING_MODE_SAME_DAY_11AM, TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE
+from .calibration.sdk_pipeline import (
+    TARGET_STATIONS,
+    TIMING_MODE_SAME_DAY_11AM,
+    TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE,
+    TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE,
+)
 from .current_observations import backfill_sdk_current_observations
 
 
@@ -17,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timing-mode",
         default=TIMING_MODE_SAME_DAY_11AM,
-        choices=[TIMING_MODE_SAME_DAY_11AM, TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE],
+        choices=[TIMING_MODE_SAME_DAY_11AM, TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE, TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE],
     )
     parser.add_argument("--as-of-hour-local", type=int, default=11)
     parser.add_argument("--chunk-days", type=int, default=31)

@@ -2,7 +2,12 @@
 
 Python research pipeline for daily high-temperature forecast markets. The current deployment direction is a same-day 11 AM station-stacking v2 workflow that combines GFS, HRRR, current station observations, calendar features, lagged history, and notebook-v2 engineered features.
 
-New collaborators should start with [QUICKSTART.md](QUICKSTART.md). Local data expectations are documented in [DATA.md](DATA.md), and notebook status is documented in [notebooks/README.md](notebooks/README.md).
+New collaborators should start with
+[QUICKSTART.md](docs/getting-started/QUICKSTART.md). The active
+per-station training workflow and SOP are under
+[Station Training](docs/station-training/README.md). Local data expectations
+are documented in [DATA.md](docs/data/DATA.md), and notebook history/status is
+documented in [the notebook catalog](docs/notebooks/README.md).
 
 The observed target variable is the final station daily high:
 
@@ -142,16 +147,16 @@ python -m src.backfill_direct_nbm --sdk-cache-dir data/calibration/direct_nbm_20
 Run station-level stacking v2 notebooks:
 
 ```text
-notebooks/station_stacking_v2/stacking_KATL_v2.ipynb
-notebooks/station_stacking_v2/stacking_KAUS_v2.ipynb
+notebooks/experiments/station_stacking_v2/stacking_KATL_v2.ipynb
+notebooks/experiments/station_stacking_v2/stacking_KAUS_v2.ipynb
 ...
 ```
 
 Those notebooks patch in v2 feature engineering, call `src.calibration.station_stacking.run_station_year_split_experiment`, write wide station/date feature files, compare raw-provider baselines, tune XGBoost/LightGBM/CatBoost on fixed year splits, and train the Ridge stack.
 
-For the precipitation-feature experiment, run the v4 notebooks under `notebooks/station_stacking_v4/`. They write artifacts to `data/calibration/station_stacking_v4`.
+For the precipitation-feature experiment, run the v4 notebooks under `notebooks/experiments/station_stacking_v4/`. They write artifacts to `data/calibration/station_stacking_v4`.
 
-For the MAE-tuned v5/v6 experiment path, use `notebooks/station_stacking_v5/` and `notebooks/station_stacking_v6/`. V6 writes artifacts to `data/calibration/station_stacking_v6`; the actual model input list is `{STATION}_feature_columns.csv`, not only the raw cache schema or the `V6_FEATURE_COLUMNS` constant. Current v6 artifacts contain 237 candidate training inputs, and all-NaN numeric inputs are removed before model fitting.
+For the MAE-tuned v5/v6 experiment path, use `notebooks/experiments/station_stacking_v5/` and `notebooks/experiments/station_stacking_v6/`. V6 writes artifacts to `data/calibration/station_stacking_v6`; the actual model input list is `{STATION}_feature_columns.csv`, not only the raw cache schema or the `V6_FEATURE_COLUMNS` constant. Current v6 artifacts contain 237 candidate training inputs, and all-NaN numeric inputs are removed before model fitting.
 
 Export station-stacking v2 model weights:
 

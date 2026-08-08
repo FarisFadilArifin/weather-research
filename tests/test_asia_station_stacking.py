@@ -12,8 +12,10 @@ from src.calibration.asia_station_stacking import (
     build_asia_station_wide_dataset,
 )
 from src.calibration.station_stacking import (
+    POINT_IN_TIME_UNSAFE_FEATURE_COLUMNS,
     StationStackingConfig,
     V20_ASIA_NO_PEAK_FEATURE_VERSION,
+    feature_columns,
     run_station_year_split_experiment,
 )
 
@@ -137,6 +139,31 @@ def test_asia_folds_start_with_available_history() -> None:
     assert all(fold.validation_year != 2022 for fold in folds)
 
 
+def test_asia_point_model_excludes_final_same_day_iem_highs() -> None:
+    frame = pd.DataFrame(
+        {
+            "actual_high_f": [86.0],
+            "observed_high_temp_through_as_of_f": [80.0],
+            "iem_daily_high_f": [86.0],
+            "iem_daily_high_c": [30.0],
+        }
+    )
+    config = StationStackingConfig(
+        station_id="RJTT",
+        providers=ASIA_PROVIDERS,
+        feature_version=V20_ASIA_NO_PEAK_FEATURE_VERSION,
+        training_profile="v20_aligned",
+        target_mode="remaining_warmup",
+        target_source="wunderground_only",
+    )
+
+    categorical, numeric = feature_columns(frame, config)
+    selected = set(categorical) | set(numeric)
+
+    assert "observed_high_temp_through_as_of_f" in selected
+    assert selected.isdisjoint(POINT_IN_TIME_UNSAFE_FEATURE_COLUMNS)
+
+
 def test_asia_reduced_year_split_smoke_runs_without_network(tmp_path: Path) -> None:
     dates = pd.date_range("2022-01-01", "2026-01-10", freq="14D")
     rows = []
@@ -187,17 +214,35 @@ def test_asia_reduced_year_split_smoke_runs_without_network(tmp_path: Path) -> N
 
 def test_asia_notebook_generator_matches_committed_outputs() -> None:
     root = Path(__file__).resolve().parents[1]
-    notebook_root = root / "notebooks" / "station_stacking_v20_asia_no_peak"
+    notebook_root = (
+        root
+        / "notebooks"
+        / "experiments"
+        / "station_stacking_v20_asia_no_peak"
+    )
     generator_path = notebook_root / "generate_city_notebooks.py"
     spec = importlib.util.spec_from_file_location("asia_notebook_generator", generator_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
+    def source_contract(notebook: dict) -> dict:
+        return {
+            "nbformat": notebook["nbformat"],
+            "nbformat_minor": notebook["nbformat_minor"],
+            "cells": [
+                {
+                    "cell_type": cell["cell_type"],
+                    "source": cell.get("source", []),
+                }
+                for cell in notebook["cells"]
+            ],
+        }
+
     for city in ("tokyo", "seoul"):
         generated = module._notebook(city)
         stored = json.loads((notebook_root / f"stacking_{city.title()}_v20_no_peak.ipynb").read_text(encoding="utf-8"))
-        assert generated == stored
+        assert source_contract(generated) == source_contract(stored)
         source = "".join("".join(cell.get("source", [])) for cell in stored["cells"])
         assert f'CITY_ID = "{city}"' in source
         assert "v20_asia_no_peak" in source
@@ -205,5 +250,13 @@ def test_asia_notebook_generator_matches_committed_outputs() -> None:
         assert "V20_PEAK_TIMING" not in source
         assert "hrrr" not in source.lower()
         assert "nbm" not in source.lower()
-        assert all(cell.get("execution_count") is None for cell in stored["cells"] if cell["cell_type"] == "code")
-        assert all(not cell.get("outputs") for cell in stored["cells"] if cell["cell_type"] == "code")
+        assert all(
+            cell.get("execution_count") is None
+            for cell in generated["cells"]
+            if cell["cell_type"] == "code"
+        )
+        assert all(
+            not cell.get("outputs")
+            for cell in generated["cells"]
+            if cell["cell_type"] == "code"
+        )

@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "pandas>=2.2",
+    "pyarrow>=15",
     "numpy>=1.26",
     "requests>=2.32",
     "pydantic>=2.7",

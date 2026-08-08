@@ -124,7 +124,13 @@ def test_hierarchical_shrinkage_walk_forward_is_finite(tmp_path) -> None:
 
 
 def test_ml_workflow_is_exposed_as_notebook() -> None:
-    path = Path(__file__).resolve().parents[1] / "notebooks" / "calibration_ml_walkforward.ipynb"
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "notebooks"
+        / "experiments"
+        / "calibration_ml_walkforward"
+        / "calibration_ml_walkforward.ipynb"
+    )
     notebook = json.loads(path.read_text(encoding="utf-8"))
     source = "\n".join(
         "".join(cell.get("source", []))

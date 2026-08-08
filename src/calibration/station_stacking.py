@@ -21,13 +21,18 @@ from .data_quality import (
 
 TARGET_STATIONS = ("KATL", "KAUS", "KORD", "KDAL", "KHOU", "KLAX", "KMIA", "KLGA", "KSEA")
 TARGET_PROVIDERS = ("gfs", "hrrr")
-OPTIONAL_PROVIDERS = ("nbm", "gefs", "jma_msm")
+OPTIONAL_PROVIDERS = ("nbm", "ifs", "icon", "gefs", "jma_msm")
 TARGET = "actual_high_f"
 TARGET_SOURCE_IEM_HOURLY = "iem_hourly"
 TARGET_SOURCE_SETTLEMENT_FIRST = "settlement_first"
 TARGET_SOURCE_WUNDERGROUND_ONLY = "wunderground_only"
+TARGET_SOURCE_HKO_DAILY_MAX = "hko_daily_max"
 OBSERVED_HIGH_SO_FAR_COLUMN = "observed_high_temp_through_as_of_f"
 REMAINING_WARMUP_TARGET = "remaining_warmup_from_observed_high_so_far_f"
+POINT_IN_TIME_UNSAFE_FEATURE_COLUMNS = {
+    "iem_daily_high_f",
+    "iem_daily_high_c",
+}
 TARGET_MODE_DIRECT_HIGH = "actual_high"
 TARGET_MODE_REMAINING_WARMUP = "remaining_warmup"
 TRAINING_PROFILE_LEGACY = "legacy"
@@ -35,7 +40,10 @@ TRAINING_PROFILE_V20_ALIGNED = "v20_aligned"
 TIMING_MODE_SAME_DAY_11AM = "same_day_11am"
 TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE = "same_day_11am_live_safe"
 TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE = "same_day_9am_live_safe"
+TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE = "same_day_1pm_live_safe"
 V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION = "v11_settlement_fix_temp"
+V20_KDAL_1PM_NO_PEAK_FEATURE_VERSION = "v20_kdal_1pm_no_peak"
+V20_HKO_GFS_NO_PEAK_FEATURE_VERSION = "v20_hko_gfs_no_peak"
 V20_ASIA_NO_PEAK_FEATURE_VERSION = "v20_asia_no_peak"
 V15_FEATURE_VERSIONS = ("v15_base", "v15_forecast_temp_at_as_of", "v15_precip_cloud")
 V16_FEATURE_VERSIONS = ("v16_fused",)
@@ -65,15 +73,17 @@ SUPPORTED_FEATURE_VERSIONS = (
     *V18_1_FEATURE_VERSIONS,
     V20_FEATURE_VERSION,
     V20_KDAL_FIX_FEATURE_VERSION,
+    V20_KDAL_1PM_NO_PEAK_FEATURE_VERSION,
+    V20_HKO_GFS_NO_PEAK_FEATURE_VERSION,
     V20_ASIA_NO_PEAK_FEATURE_VERSION,
 )
-CURRENT_OBS_TREND_FEATURE_VERSIONS = {"v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}
-CLIMATOLOGY_FEATURE_VERSIONS = {"v9", "v10", "v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}
-HUBER_STACK_FEATURE_VERSIONS = {"v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}
-CATBOOST_HUBER_FEATURE_VERSIONS = {"v10", "v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}
+CURRENT_OBS_TREND_FEATURE_VERSIONS = {"v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_KDAL_1PM_NO_PEAK_FEATURE_VERSION, V20_HKO_GFS_NO_PEAK_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}
+CLIMATOLOGY_FEATURE_VERSIONS = {"v9", "v10", "v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_KDAL_1PM_NO_PEAK_FEATURE_VERSION, V20_HKO_GFS_NO_PEAK_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}
+HUBER_STACK_FEATURE_VERSIONS = {"v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_KDAL_1PM_NO_PEAK_FEATURE_VERSION, V20_HKO_GFS_NO_PEAK_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}
+CATBOOST_HUBER_FEATURE_VERSIONS = {"v10", "v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_KDAL_1PM_NO_PEAK_FEATURE_VERSION, V20_HKO_GFS_NO_PEAK_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}
 V14_ADDITIONAL_MIN_NON_NULL_FRACTION = 0.80
 V15_ADDITIONAL_MIN_TRAIN_NON_NULL_FRACTION = 0.70
-WEATHER_AGGREGATE_FEATURE_VERSIONS = {"v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION, "v15_forecast_temp_at_as_of", "v15_precip_cloud", "v16_fused", "v17_importance_015", *V20_PEAK_TIMING_FEATURE_VERSIONS}
+WEATHER_AGGREGATE_FEATURE_VERSIONS = {"v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_KDAL_1PM_NO_PEAK_FEATURE_VERSION, V20_HKO_GFS_NO_PEAK_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION, "v15_forecast_temp_at_as_of", "v15_precip_cloud", "v16_fused", "v17_importance_015", *V20_PEAK_TIMING_FEATURE_VERSIONS}
 GUARDED_BLEND_CAPS_F = (1.0, 2.0, 3.0)
 V18_NBM_RAP_SHARD_ROOT = Path("data/calibration/nbm_rap_features_shards_priority_20260702_full")
 V20_PEAK_TIMING_SHARD_ROOTS = (
@@ -85,6 +95,8 @@ V18_BUCKET_LOG_LOSS_EPSILON = 1e-12
 FORECAST_CACHE_PATTERNS = (
     ("sdk_nwp_0h_cache.csv", "sdk_11am_*/sdk_nwp_0h_cache.csv"),
     ("sdk_nwp_0h_cache.csv", "sdk_9am_*/sdk_nwp_0h_cache.csv"),
+    ("sdk_nwp_0h_cache.csv", "sdk_1pm_*/sdk_nwp_0h_cache.csv"),
+    ("direct_nbm_0h_cache.csv", "sdk_1pm_*/direct_nbm_0h_cache.csv"),
     ("direct_nbm_0h_cache.csv", "direct_nbm_*/direct_nbm_0h_cache.csv"),
 )
 
@@ -205,6 +217,8 @@ OBSERVED_NUMERIC_COLUMNS = [
     "observed_temp_change_last_3h_f",
     "observed_morning_warmup_rate_f_per_hour",
     "observed_high_so_far_change_since_9am_f",
+    "observed_temp_change_since_11am_f",
+    "observed_high_so_far_change_since_11am_f",
 ]
 
 OBSERVED_TEXT_COLUMNS = [
@@ -240,6 +254,7 @@ BASELINE_METHODS = [
     "best_raw_provider",
 ]
 BASE_MODEL_METHODS = ["xgboost", "lightgbm", "catboost"]
+SUPPORTED_BASE_MODEL_METHODS = [*BASE_MODEL_METHODS, "extra_trees", "ridge", "svr"]
 DEFAULT_BASE_MODEL_METHODS = tuple(BASE_MODEL_METHODS)
 STACK_METHOD = "ridge_stack"
 V12_GUARDED_BLEND_METHODS = tuple(f"guarded_blend_cap_{cap:g}f" for cap in GUARDED_BLEND_CAPS_F)
@@ -352,6 +367,52 @@ V11_SETTLEMENT_FIX_TEMP_FEATURE_COLUMNS = [
     "v11sf_forecast_temp_bias_remaining_warmup_interaction",
     "v11sf_observation_adjusted_provider_high_f",
     "v11sf_forecast_warmup_after_11am_f",
+]
+V20_KDAL_1PM_TEMP_FEATURE_COLUMNS = [
+    "v13sf_forecast_temp_1pm_mean_f",
+    "v13sf_forecast_temp_1pm_median_f",
+    "v13sf_forecast_temp_1pm_minus_observed_f",
+    "v13sf_forecast_temp_1pm_abs_error_f",
+    "v13sf_forecast_temp_1pm_warm_error_f",
+    "v13sf_forecast_temp_1pm_cool_error_f",
+    "v13sf_forecast_temp_1pm_spread_f",
+    "v13sf_forecast_temp_1pm_provider_count",
+    "v13sf_forecast_temp_bias_remaining_warmup_interaction",
+    "v13sf_observation_adjusted_provider_high_f",
+    "v13sf_forecast_warmup_after_1pm_f",
+]
+V20_KDAL_1PM_FORECAST_WEATHER_FEATURE_COLUMNS = (
+    "v4_forecast_precip_total_mean_mm",
+    "v4_forecast_precip_total_max_mm",
+    "v4_forecast_precip_total_spread_mm",
+    "v4_forecast_precip_max_1h_mean_mm",
+    "v4_forecast_precip_hours_mean",
+    "v4_forecast_precip_intensity_mean",
+    "v4_forecast_precip_intensity_max",
+    "v4_any_forecast_precip",
+    "v4_all_forecast_precip",
+    "v4_forecast_total_minus_observed_recent_mm",
+    "v4_forecast_observed_precip_match",
+    "v4_forecast_wet_observed_dry",
+    "v4_observed_wet_forecast_dry",
+    "v4_precip_humidity_interaction",
+    "v4_precip_remaining_warmup_interaction",
+    "v8_cloud_cover_mean_remaining_warmup_interaction",
+    "v8_cloud_cover_max_remaining_warmup_interaction",
+    "v8_precip_total_remaining_warmup_interaction",
+    "v8_precip_max_1h_remaining_warmup_interaction",
+    "v8_wind_speed_mean_remaining_warmup_interaction",
+    "v8_wind_gust_max_remaining_warmup_interaction",
+    "v8_forecast_dewpoint_mean_f",
+    "v8_forecast_dewpoint_depression_mean_f",
+    "v8_dewpoint_mean_remaining_warmup_interaction",
+    "v8_dewpoint_depression_remaining_warmup_interaction",
+)
+V20_KDAL_1PM_FEATURE_COLUMNS = [
+    *V11_FEATURE_COLUMNS,
+    *V20_KDAL_1PM_TEMP_FEATURE_COLUMNS,
+    "observed_temp_change_since_11am_f",
+    "observed_high_so_far_change_since_11am_f",
 ]
 V13_ADDITIONAL_FEATURE_COLUMNS = [
     "v13_forecast_temp_at_as_of_mean_f",
@@ -704,6 +765,41 @@ V9_DROPPED_FEATURE_COLUMNS = {
 V10_DROPPED_FEATURE_COLUMNS = V9_DROPPED_FEATURE_COLUMNS
 V11_DROPPED_FEATURE_COLUMNS = V9_DROPPED_FEATURE_COLUMNS
 V11_SETTLEMENT_FIX_DROPPED_FEATURE_COLUMNS = V9_DROPPED_FEATURE_COLUMNS
+V20_HKO_GFS_NO_PEAK_DROPPED_FEATURE_COLUMNS = {
+    *V11_SETTLEMENT_FIX_DROPPED_FEATURE_COLUMNS,
+    "actual_high_c",
+    # One-provider ensemble aliases and disagreement features.
+    "provider_mean_high_f",
+    "provider_median_high_f",
+    "provider_min_high_f",
+    "provider_max_high_f",
+    "provider_spread_high_f",
+    "provider_std_high_f",
+    "gfs_minus_provider_mean_high_f",
+    "gfs_rank_high",
+    "gfs_is_warmest",
+    "gfs_is_coldest",
+    # Fixed GFS timing/coverage fields for this profile.
+    "gfs_forecast_hour_min",
+    "gfs_forecast_hour_max",
+    "gfs_forecast_lead_hours",
+    "gfs_forecast_window_hours",
+    "observed_precip_amount_available",
+    # Structurally zero or duplicate one-provider engineered features.
+    "v2_spread_per_warmup_f",
+    "v3_remaining_warmup_per_spread_f",
+    "v4_forecast_precip_total_max_mm",
+    "v4_forecast_precip_total_spread_mm",
+    "v4_forecast_precip_intensity_max",
+    "v4_all_forecast_precip",
+    "v8_provider_max_remaining_from_high_so_far_f",
+    "v8_provider_min_remaining_from_high_so_far_f",
+    "v8_provider_median_remaining_from_high_so_far_f",
+    "v8_provider_spread_per_remaining_warmup_f",
+    "v11sf_forecast_temp_11am_median_f",
+    "v11sf_forecast_temp_11am_spread_f",
+    "v11sf_forecast_temp_11am_provider_count",
+}
 V12_DROPPED_FEATURE_COLUMNS = V9_DROPPED_FEATURE_COLUMNS
 V13_DROPPED_FEATURE_COLUMNS = V9_DROPPED_FEATURE_COLUMNS
 V14_DROPPED_FEATURE_COLUMNS = V9_DROPPED_FEATURE_COLUMNS
@@ -752,6 +848,8 @@ class StationStackingConfig:
     feature_importance_repeats: int | None = None
     max_feature_missing_fraction: float | None = None
     output_dir: str | Path | None = None
+    observation_target_same_station: bool = True
+    observation_source: str = "default"
     prebuilt_features: pd.DataFrame | None = None
 
     def resolved_project_root(self) -> Path:
@@ -848,10 +946,21 @@ class StationStackingConfig:
             "wunderground": TARGET_SOURCE_WUNDERGROUND_ONLY,
             "wunderground_only": TARGET_SOURCE_WUNDERGROUND_ONLY,
             "wu_only": TARGET_SOURCE_WUNDERGROUND_ONLY,
+            "hko": TARGET_SOURCE_HKO_DAILY_MAX,
+            "hko_daily": TARGET_SOURCE_HKO_DAILY_MAX,
+            "hko_daily_max": TARGET_SOURCE_HKO_DAILY_MAX,
         }
         source = aliases.get(value, value)
-        if source not in {TARGET_SOURCE_IEM_HOURLY, TARGET_SOURCE_SETTLEMENT_FIRST, TARGET_SOURCE_WUNDERGROUND_ONLY}:
-            raise ValueError("target_source must be one of: 'iem_hourly', 'settlement_first', or 'wunderground_only'")
+        if source not in {
+            TARGET_SOURCE_IEM_HOURLY,
+            TARGET_SOURCE_SETTLEMENT_FIRST,
+            TARGET_SOURCE_WUNDERGROUND_ONLY,
+            TARGET_SOURCE_HKO_DAILY_MAX,
+        }:
+            raise ValueError(
+                "target_source must be one of: 'iem_hourly', 'settlement_first', "
+                "'wunderground_only', or 'hko_daily_max'"
+            )
         return source
 
     @property
@@ -908,8 +1017,11 @@ class StationStackingConfig:
             method = str(raw_method).strip().lower()
             if not method:
                 continue
-            if method not in BASE_MODEL_METHODS:
-                raise ValueError(f"base_model_methods must be drawn from: {', '.join(BASE_MODEL_METHODS)}")
+            if method not in SUPPORTED_BASE_MODEL_METHODS:
+                raise ValueError(
+                    "base_model_methods must be drawn from: "
+                    f"{', '.join(SUPPORTED_BASE_MODEL_METHODS)}"
+                )
             if method not in methods:
                 methods.append(method)
         if not methods:
@@ -1158,7 +1270,10 @@ def _current_observation_quality_rank(frame: pd.DataFrame, timing_mode: str = TI
     as_of_text = frame.get("observed_as_of_time_local", pd.Series(pd.NA, index=frame.index)).astype("string")
     clock = as_of_text.str.extract(r"T(?P<hour>\d{2}):(?P<minute>\d{2})")
     local_minutes = pd.to_numeric(clock["hour"], errors="coerce") * 60 + pd.to_numeric(clock["minute"], errors="coerce")
-    window_hour = 9 if timing_mode == TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE else 11
+    window_hour = {
+        TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE: 9,
+        TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE: 13,
+    }.get(timing_mode, 11)
     in_window = local_minutes.between(window_hour * 60 - 10, window_hour * 60 + 10)
 
     return (
@@ -1251,8 +1366,8 @@ def build_station_wide_dataset(
     root = Path(project_root)
     station_id = station_id.upper()
     version = _normalize_feature_version(feature_version)
-    if version == V20_KDAL_FIX_FEATURE_VERSION and station_id != "KDAL":
-        raise ValueError(f"{V20_KDAL_FIX_FEATURE_VERSION} is limited to KDAL")
+    if version in {V20_KDAL_FIX_FEATURE_VERSION, V20_KDAL_1PM_NO_PEAK_FEATURE_VERSION} and station_id != "KDAL":
+        raise ValueError(f"{version} is limited to KDAL")
     actuals = _load_station_actuals(root, station_id, target_source=target_source)
     if version in V20_PEAK_TIMING_FEATURE_VERSIONS:
         actuals = _expand_v20_actual_date_spine(root, station_id, actuals, target_source=target_source)
@@ -1307,7 +1422,7 @@ def build_station_wide_dataset(
 def raw_baseline_predictions(frame: pd.DataFrame, config: StationStackingConfig) -> pd.DataFrame:
     rows: list[pd.DataFrame] = []
     frame = _with_actual_quality_columns(frame, config)
-    base = add_strict_quality_flags(frame, providers=config.providers)
+    base = _add_configured_quality_flags(frame, config)
     base = base.loc[base[STRICT_QUALITY_OK_COLUMN].fillna(False)].dropna(subset=[TARGET]).copy()
     for provider in config.providers:
         column = HIGH_COLUMNS[provider]
@@ -1620,7 +1735,7 @@ def year_split_baseline_predictions(
     rows: list[pd.DataFrame] = []
     if frame.empty:
         return _empty_year_split_predictions()
-    frame = add_strict_quality_flags(_with_actual_quality_columns(frame, config), providers=config.providers)
+    frame = _add_configured_quality_flags(_with_actual_quality_columns(frame, config), config)
     frame = frame.loc[frame[STRICT_QUALITY_OK_COLUMN].fillna(False)].copy()
     if frame.empty:
         return _empty_year_split_predictions()
@@ -1665,7 +1780,7 @@ def tune_year_split_base_models(
     if frame.empty:
         return pd.DataFrame(), _empty_year_split_predictions(), pd.DataFrame()
     frame = _ensure_model_target_columns(
-        add_strict_quality_flags(_with_actual_quality_columns(frame, config), providers=config.providers),
+        _add_configured_quality_flags(_with_actual_quality_columns(frame, config), config),
         config,
     )
     frame = frame.loc[frame[STRICT_QUALITY_OK_COLUMN].fillna(False)].copy()
@@ -1845,7 +1960,7 @@ def year_split_test_predictions(
     if frame.empty:
         return _empty_year_split_predictions()
     frame = _ensure_model_target_columns(
-        add_strict_quality_flags(_with_actual_quality_columns(frame, config), providers=config.providers),
+        _add_configured_quality_flags(_with_actual_quality_columns(frame, config), config),
         config,
     )
     frame = frame.loc[frame[STRICT_QUALITY_OK_COLUMN].fillna(False)].copy()
@@ -2284,9 +2399,23 @@ def select_guarded_blend_cap(
 def year_split_scoreboard(validation_predictions: pd.DataFrame, test_predictions: pd.DataFrame) -> pd.DataFrame:
     columns = ["period", "method", "count", "mae_f", "rmse_f"]
     frames: list[pd.DataFrame] = []
+    validation_years = sorted(
+        pd.to_datetime(validation_predictions.get("contract_date"), errors="coerce")
+        .dt.year.dropna().astype(int).unique()
+    ) if not validation_predictions.empty else []
+    validation_period = (
+        f"validation_{validation_years[0]}_{validation_years[-1]}"
+        if validation_years
+        else "validation_unknown"
+    )
+    test_years = sorted(
+        pd.to_datetime(test_predictions.get("contract_date"), errors="coerce")
+        .dt.year.dropna().astype(int).unique()
+    ) if not test_predictions.empty else []
+    test_period = f"test_{test_years[0]}" if len(test_years) == 1 else "test_mixed"
     for period, predictions in [
-        ("validation_2024_2025", validation_predictions),
-        (f"test_{YEAR_SPLIT_TEST_YEAR}", test_predictions),
+        (validation_period, validation_predictions),
+        (test_period, test_predictions),
     ]:
         if predictions.empty:
             continue
@@ -2402,7 +2531,7 @@ def year_split_feature_importance(
     if frame.empty or selected_hyperparameters.empty:
         return pd.DataFrame(columns=columns)
     frame = _ensure_model_target_columns(
-        add_strict_quality_flags(_with_actual_quality_columns(frame, config), providers=config.providers),
+        _add_configured_quality_flags(_with_actual_quality_columns(frame, config), config),
         config,
     )
     frame = frame.loc[frame[STRICT_QUALITY_OK_COLUMN].fillna(False)].copy()
@@ -2506,6 +2635,7 @@ def feature_columns(frame: pd.DataFrame, config: StationStackingConfig) -> tuple
     excluded = {
         TARGET,
         REMAINING_WARMUP_TARGET,
+        "remaining_warmup_after_1pm_f",
         "contract_date",
         "station_id",
         "station_name",
@@ -2533,6 +2663,7 @@ def feature_columns(frame: pd.DataFrame, config: StationStackingConfig) -> tuple
         STRICT_QUALITY_OK_COLUMN,
         STRICT_QUALITY_ISSUES_COLUMN,
     }
+    excluded.update(POINT_IN_TIME_UNSAFE_FEATURE_COLUMNS)
     excluded.update(column for column in frame.columns if column.endswith("_source_file_or_url"))
     excluded.update(column for column in frame.columns if column.endswith("_source_cache_dir"))
     excluded.update(column for column in frame.columns if column.endswith("_data_source"))
@@ -2563,6 +2694,16 @@ def feature_columns(frame: pd.DataFrame, config: StationStackingConfig) -> tuple
         excluded.update(V11_DROPPED_FEATURE_COLUMNS)
     if version in {V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION}:
         excluded.update(V11_SETTLEMENT_FIX_DROPPED_FEATURE_COLUMNS)
+        excluded.update(V20_PEAK_TIMING_RAW_FEATURE_COLUMNS)
+        excluded.update(V20_ENGINEERED_FEATURE_COLUMNS)
+    if version == V20_HKO_GFS_NO_PEAK_FEATURE_VERSION:
+        excluded.update(V20_HKO_GFS_NO_PEAK_DROPPED_FEATURE_COLUMNS)
+        excluded.update(V20_PEAK_TIMING_RAW_FEATURE_COLUMNS)
+        excluded.update(V20_ENGINEERED_FEATURE_COLUMNS)
+    if version == V20_KDAL_1PM_NO_PEAK_FEATURE_VERSION:
+        excluded.update(V11_SETTLEMENT_FIX_DROPPED_FEATURE_COLUMNS)
+        excluded.update(V11_SETTLEMENT_FIX_TEMP_FEATURE_COLUMNS)
+        excluded.update(V20_KDAL_1PM_FORECAST_WEATHER_FEATURE_COLUMNS)
         excluded.update(V20_PEAK_TIMING_RAW_FEATURE_COLUMNS)
         excluded.update(V20_ENGINEERED_FEATURE_COLUMNS)
     if version == "v12":
@@ -2619,8 +2760,20 @@ def feature_columns(frame: pd.DataFrame, config: StationStackingConfig) -> tuple
                 continue
             gated_numeric.append(column)
         numeric = gated_numeric
-    if version in {V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION}:
+    if version in {V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_HKO_GFS_NO_PEAK_FEATURE_VERSION}:
         additional = set(V11_SETTLEMENT_FIX_TEMP_FEATURE_COLUMNS)
+        base = set(V11_FEATURE_COLUMNS)
+        gated_numeric = []
+        for column in numeric:
+            if column in base:
+                gated_numeric.append(column)
+                continue
+            if _is_blocked_weather_feature(column, additional):
+                continue
+            gated_numeric.append(column)
+        numeric = gated_numeric
+    if version == V20_KDAL_1PM_NO_PEAK_FEATURE_VERSION:
+        additional = set(V20_KDAL_1PM_TEMP_FEATURE_COLUMNS)
         base = set(V11_FEATURE_COLUMNS)
         gated_numeric = []
         for column in numeric:
@@ -2901,10 +3054,15 @@ def _apply_settlement_first_actuals(
     settlements = settlements.dropna(subset=["contract_date"]).sort_values("contract_date")
     settlements = settlements.drop_duplicates("contract_date", keep="last")
 
+    # A Wunderground-only target must not inherit the IEM actuals table as its
+    # date spine. Recent Wunderground labels can legitimately arrive before
+    # the separate IEM daily-high backfill, so retain those settlement-only
+    # dates and let the forecast/observation joins populate their features.
+    merge_how = "outer" if source == TARGET_SOURCE_WUNDERGROUND_ONLY else "left"
     out = actuals.merge(
         settlements[["contract_date", "settlement_high_f", "settlement_source", "settlement_quality_flag"]],
         on="contract_date",
-        how="left",
+        how=merge_how,
         suffixes=("", "_settlement"),
     )
     for column in ["settlement_high_f", "settlement_source", "settlement_quality_flag"]:
@@ -3444,6 +3602,17 @@ def _add_current_observation_derived_features(frame: pd.DataFrame) -> pd.DataFra
     return out
 
 
+def _add_configured_quality_flags(
+    frame: pd.DataFrame,
+    config: StationStackingConfig,
+) -> pd.DataFrame:
+    return add_strict_quality_flags(
+        frame,
+        providers=config.providers,
+        compare_observation_to_actual=config.observation_target_same_station,
+    )
+
+
 def _heat_index_f(temp_f: pd.Series, humidity_pct: pd.Series) -> pd.Series:
     temp = pd.to_numeric(temp_f, errors="coerce")
     humidity = pd.to_numeric(humidity_pct, errors="coerce")
@@ -3568,6 +3737,7 @@ def _add_provider_cross_model_features(frame: pd.DataFrame, providers: tuple[str
         "pressure_mslp_mean": lambda provider: f"{provider}_pressure_mslp_mean",
         "shortwave_radiation_mean_w_m2": lambda provider: f"{provider}_shortwave_radiation_mean_w_m2",
     }
+    added: dict[str, pd.Series] = {}
     for left, right in provider_pairs:
         prefix = f"{left}_{right}"
         for feature_name, column_for in feature_map.items():
@@ -3577,9 +3747,12 @@ def _add_provider_cross_model_features(frame: pd.DataFrame, providers: tuple[str
                 continue
             left_values = pd.to_numeric(out[left_col], errors="coerce")
             right_values = pd.to_numeric(out[right_col], errors="coerce")
-            out[f"{prefix}_{feature_name}_diff_f"] = left_values - right_values
-            out[f"{prefix}_{feature_name}_abs_diff_f"] = (left_values - right_values).abs()
-    return out
+            difference = left_values - right_values
+            added[f"{prefix}_{feature_name}_diff_f"] = difference
+            added[f"{prefix}_{feature_name}_abs_diff_f"] = difference.abs()
+    if not added:
+        return out
+    return pd.concat([out, pd.DataFrame(added, index=out.index)], axis=1)
 
 
 def _add_lagged_actual_features(frame: pd.DataFrame) -> pd.DataFrame:
@@ -3727,10 +3900,12 @@ def add_versioned_feature_engineering(
     if version == "base":
         return frame
     out = add_v5_feature_engineering(frame, providers=providers)
-    if version in {"v8", "v9", "v10", "v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}:
+    if version in {"v8", "v9", "v10", "v11", "v12", "v13", "v14", V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_KDAL_1PM_NO_PEAK_FEATURE_VERSION, V20_HKO_GFS_NO_PEAK_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION, *V15_FEATURE_VERSIONS, *V16_FEATURE_VERSIONS, *V17_FEATURE_VERSIONS, *V18_FEATURE_VERSIONS, *V18_1_FEATURE_VERSIONS, *V20_PEAK_TIMING_FEATURE_VERSIONS}:
         out = add_v8_feature_engineering(out, providers=providers)
-        if version in {V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION}:
+        if version in {V11_SETTLEMENT_FIX_TEMP_FEATURE_VERSION, V20_HKO_GFS_NO_PEAK_FEATURE_VERSION, V20_ASIA_NO_PEAK_FEATURE_VERSION}:
             return add_v11_settlement_fix_temp_feature_engineering(out, providers=providers)
+        if version == V20_KDAL_1PM_NO_PEAK_FEATURE_VERSION:
+            return add_v20_kdal_1pm_temp_feature_engineering(out, providers=providers)
         if version in V20_PEAK_TIMING_FEATURE_VERSIONS:
             out = add_v11_settlement_fix_temp_feature_engineering(out, providers=providers)
             return add_v20_peak_timing_feature_engineering(out)
@@ -3956,6 +4131,40 @@ def add_v11_settlement_fix_temp_feature_engineering(
     out["v11sf_forecast_temp_bias_remaining_warmup_interaction"] = signed_delta * remaining_warmup
     out["v11sf_observation_adjusted_provider_high_f"] = provider_mean_high - signed_delta
     out["v11sf_forecast_warmup_after_11am_f"] = provider_mean_high - forecast_mean
+    return out
+
+
+def add_v20_kdal_1pm_temp_feature_engineering(
+    frame: pd.DataFrame,
+    providers: tuple[str, ...] = TARGET_PROVIDERS,
+) -> pd.DataFrame:
+    """Add live-safe 1 PM forecast/observation temperature alignment features."""
+    out = frame.copy()
+    observed_temp = _numeric_series(out, "observed_temp_at_as_of_f")
+    high_so_far = _numeric_series(out, "observed_high_temp_through_as_of_f")
+    provider_mean_high = _numeric_series(out, "provider_mean_high_f")
+    forecast_temps = _provider_matrix(out, providers, "forecast_temp_at_as_of_f")
+
+    provider_count = forecast_temps.notna().sum(axis=1).astype("int64")
+    forecast_mean = forecast_temps.mean(axis=1, skipna=True).where(provider_count.gt(0))
+    forecast_median = forecast_temps.median(axis=1, skipna=True).where(provider_count.gt(0))
+    forecast_spread = (forecast_temps.max(axis=1, skipna=True) - forecast_temps.min(axis=1, skipna=True)).where(
+        provider_count.gt(0)
+    )
+    signed_delta = forecast_mean - observed_temp
+    remaining_warmup = provider_mean_high - high_so_far
+
+    out["v13sf_forecast_temp_1pm_mean_f"] = forecast_mean
+    out["v13sf_forecast_temp_1pm_median_f"] = forecast_median
+    out["v13sf_forecast_temp_1pm_minus_observed_f"] = signed_delta
+    out["v13sf_forecast_temp_1pm_abs_error_f"] = signed_delta.abs()
+    out["v13sf_forecast_temp_1pm_warm_error_f"] = signed_delta.clip(lower=0)
+    out["v13sf_forecast_temp_1pm_cool_error_f"] = (-signed_delta).clip(lower=0)
+    out["v13sf_forecast_temp_1pm_spread_f"] = forecast_spread
+    out["v13sf_forecast_temp_1pm_provider_count"] = provider_count
+    out["v13sf_forecast_temp_bias_remaining_warmup_interaction"] = signed_delta * remaining_warmup
+    out["v13sf_observation_adjusted_provider_high_f"] = provider_mean_high - signed_delta
+    out["v13sf_forecast_warmup_after_1pm_f"] = provider_mean_high - forecast_mean
     return out
 
 
@@ -4226,12 +4435,18 @@ def _walk_forward_best_raw_provider(frame: pd.DataFrame, config: StationStacking
 
 def _modeling_frame(frame: pd.DataFrame, config: StationStackingConfig) -> tuple[pd.DataFrame, list[str], list[str]]:
     frame = _ensure_model_target_columns(_with_actual_quality_columns(frame, config), config)
-    frame = add_strict_quality_flags(frame, providers=config.providers)
+    frame = _add_configured_quality_flags(frame, config)
     categorical, numeric = feature_columns(frame, config)
     frame = _drop_missing_model_target(frame, config)
     if frame.empty:
         return frame, categorical, numeric
     required = [HIGH_COLUMNS[provider] for provider in config.providers]
+    if config.effective_training_profile == TRAINING_PROFILE_V20_ALIGNED:
+        required.extend(
+            f"{provider}_forecast_temp_at_as_of_f" for provider in config.providers
+        )
+    if any(column not in frame for column in required):
+        return frame.iloc[0:0].copy(), categorical, numeric
     clean = frame.dropna(subset=required).loc[frame["all_provider_highs_available"].fillna(False)].copy()
     clean = clean.loc[clean[STRICT_QUALITY_OK_COLUMN].fillna(False)].copy()
     clean = clean.sort_values("contract_date").reset_index(drop=True)
@@ -4280,7 +4495,9 @@ def _prediction_output_to_high(predicted: Any, frame: pd.DataFrame, config: Stat
         return predicted_array
     high_so_far = pd.to_numeric(frame[OBSERVED_HIGH_SO_FAR_COLUMN], errors="coerce").to_numpy(dtype=float)
     predicted_high = high_so_far + predicted_array
-    return np.maximum(predicted_high, high_so_far)
+    if config.observation_target_same_station:
+        return np.maximum(predicted_high, high_so_far)
+    return predicted_high
 
 
 def _unique_columns(columns: list[str]) -> list[str]:
@@ -4430,6 +4647,61 @@ def _build_base_model_estimator(
         elif "eval_metric" in params:
             cat_params["eval_metric"] = str(params["eval_metric"])
         return CatBoostRegressor(**cat_params)
+    if method == "extra_trees":
+        from sklearn.ensemble import ExtraTreesRegressor
+
+        bootstrap = bool(params.get("bootstrap", False))
+        estimator_params = {
+            "n_estimators": n_estimators,
+            "criterion": "squared_error",
+            "max_depth": _optional_int(params.get("max_depth")),
+            "min_samples_split": int(params.get("min_samples_split", 2)),
+            "min_samples_leaf": int(params.get("min_samples_leaf", 2)),
+            "max_features": float(params.get("max_features", 0.75)),
+            "bootstrap": bootstrap,
+            "random_state": config.random_state,
+            "n_jobs": -1,
+        }
+        if bootstrap:
+            estimator_params["max_samples"] = float(params.get("max_samples", 1.0))
+        return ExtraTreesRegressor(**estimator_params)
+    if method == "ridge":
+        from sklearn.linear_model import Ridge
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler
+
+        return Pipeline(
+            [
+                ("scale", StandardScaler()),
+                (
+                    "ridge",
+                    Ridge(
+                        alpha=float(params.get("alpha", 100.0)),
+                        fit_intercept=bool(params.get("fit_intercept", True)),
+                    ),
+                ),
+            ]
+        )
+    if method == "svr":
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.svm import SVR
+
+        return Pipeline(
+            [
+                ("scale", StandardScaler()),
+                (
+                    "svr",
+                    SVR(
+                        kernel="rbf",
+                        C=float(params.get("C", 10.0)),
+                        epsilon=float(params.get("epsilon", 0.1)),
+                        gamma=params.get("gamma", "scale"),
+                        cache_size=float(params.get("cache_size", 2048.0)),
+                    ),
+                ),
+            ]
+        )
     raise ValueError(f"Unknown base model method: {method}")
 
 
@@ -4569,6 +4841,17 @@ def _best_iteration(estimator: Any) -> int | None:
         except (TypeError, ValueError):
             return None
     return None
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value is pd.NA:
+        return None
+    try:
+        if bool(pd.isna(value)):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return int(value)
 
 
 def _year_split_fold_weight(fold: YearSplitFold, config: StationStackingConfig | None = None) -> float:
@@ -4718,7 +5001,7 @@ def _create_optuna_study(config: StationStackingConfig, method: str):
 
     optuna.logging.set_verbosity(optuna.logging.INFO if config.optuna_verbose else optuna.logging.WARNING)
     sampler = optuna.samplers.TPESampler(
-        seed=config.random_state + BASE_MODEL_METHODS.index(method),
+        seed=config.random_state + SUPPORTED_BASE_MODEL_METHODS.index(method),
         n_startup_trials=config.effective_optuna_startup_trials,
     )
     pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=1)
@@ -4754,7 +5037,16 @@ def _optuna_study_name(config: StationStackingConfig, *, stage: str, method: str
     space_part = "" if space == "default" else f"_{space}"
     profile = config.effective_training_profile
     profile_part = "" if profile == TRAINING_PROFILE_LEGACY else f"_{profile}"
-    return f"{station}_{version}{target_part}{profile_part}_{stage}_{method}_{metric}{space_part}"
+    observation_scope_part = "" if config.observation_target_same_station else "_cross_station_target"
+    observation_source = "".join(
+        character if character.isalnum() else "_"
+        for character in str(config.observation_source or "default").lower()
+    ).strip("_")
+    observation_source_part = "" if observation_source in {"", "default"} else f"_obs_{observation_source}"
+    return (
+        f"{station}_{version}{target_part}{profile_part}_{stage}_{method}_{metric}"
+        f"{space_part}{observation_scope_part}{observation_source_part}"
+    )
 
 
 def _remaining_optuna_trials(study: Any, target_trials: int) -> int:
@@ -4909,6 +5201,49 @@ def _suggest_hyperparameters(method: str, trial, config: StationStackingConfig) 
             huber_delta_choices = (0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 7.5, 10.0) if wide_plus else (0.5, 1.0, 1.5, 2.0, 3.0, 5.0)
             params["huber_delta"] = trial.suggest_categorical("huber_delta", huber_delta_choices)
         return params
+    if method == "extra_trees":
+        max_estimators = 250 if config.fast_mode else (1200 if wide_plus else 800 if wide else 600)
+        bootstrap = trial.suggest_categorical("bootstrap", (False, True))
+        params = {
+            "n_estimators": trial.suggest_int("n_estimators", 80 if config.fast_mode else 200, max_estimators),
+            "max_depth": trial.suggest_categorical(
+                "max_depth",
+                (None, 8, 12, 16, 24) if wide else (None, 8, 12, 16),
+            ),
+            "min_samples_split": trial.suggest_int("min_samples_split", 2, 30 if wide else 16),
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 16 if wide else 10),
+            "max_features": trial.suggest_float("max_features", 0.3 if wide else 0.5, 1.0),
+            "bootstrap": bootstrap,
+        }
+        if bootstrap:
+            params["max_samples"] = trial.suggest_float("max_samples", 0.5, 1.0)
+        return params
+    if method == "ridge":
+        return {
+            "alpha": trial.suggest_float(
+                "alpha",
+                1e-6 if wide_plus else 1e-4 if wide else 1e-3,
+                1e6 if wide_plus else 1e5 if wide else 1e4,
+                log=True,
+            ),
+            "fit_intercept": trial.suggest_categorical("fit_intercept", (True, False)),
+        }
+    if method == "svr":
+        return {
+            "C": trial.suggest_float(
+                "C",
+                0.1 if wide else 0.3,
+                1000.0 if wide_plus else 300.0 if wide else 100.0,
+                log=True,
+            ),
+            "epsilon": trial.suggest_float("epsilon", 0.05, 1.0),
+            "gamma": trial.suggest_float(
+                "gamma",
+                1e-6 if wide_plus else 1e-5,
+                1e-1 if wide else 3e-2,
+                log=True,
+            ),
+        }
     raise ValueError(f"Unknown base model method: {method}")
 
 
@@ -5136,8 +5471,9 @@ def _sort_year_split_visible_methods(frame: pd.DataFrame, include_period: bool =
     method_order = {method: index for index, method in enumerate(YEAR_SPLIT_SCOREBOARD_METHODS)}
     sort_columns = []
     if include_period and "period" in out:
-        period_order = {"validation_2024_2025": 0, f"test_{YEAR_SPLIT_TEST_YEAR}": 1}
-        out["_period_order"] = out["period"].map(period_order).fillna(len(period_order))
+        out["_period_order"] = out["period"].astype(str).map(
+            lambda value: 0 if value.startswith("validation_") else 1
+        )
         sort_columns.append("_period_order")
     out["_method_order"] = out["method"].map(method_order).fillna(len(method_order))
     sort_columns.append("_method_order")
