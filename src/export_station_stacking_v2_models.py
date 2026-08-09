@@ -36,6 +36,12 @@ from src.calibration.station_stacking import (
     _year_split_fold_weight,
     _year_split_stack_source_frame,
 )
+from src.calibration.temperature_buckets import (
+    FLOOR_CELSIUS_1C,
+    POLYMARKET_CELSIUS_1C,
+    POLYMARKET_FAHRENHEIT_2F,
+    validate_bucket_contract,
+)
 
 
 MODEL_VERSION = "station_high_regressor_v2"
@@ -49,8 +55,9 @@ DEFAULT_OPTUNA_METRIC = "rmse_f"
 DEFAULT_TARGET_MODE = TARGET_MODE_DIRECT_HIGH
 DEFAULT_BASE_MODEL_METHODS = tuple(BASE_MODEL_METHODS)
 DEFAULT_SOURCE_PIPELINE = "notebooks/experiments/station_stacking_v2"
-DEFAULT_BUCKET_CONTRACT = "polymarket_half_up_2f"
-HKO_BUCKET_CONTRACT = "floor_1c"
+DEFAULT_BUCKET_CONTRACT = POLYMARKET_FAHRENHEIT_2F
+CELSIUS_BUCKET_CONTRACT = POLYMARKET_CELSIUS_1C
+HKO_BUCKET_CONTRACT = FLOOR_CELSIUS_1C
 
 
 @dataclass(frozen=True)
@@ -145,6 +152,24 @@ def export_station_model_weights(
     feature_names = [*fit_categorical, *fit_numeric]
     if not feature_names:
         raise ValueError(f"No non-empty feature columns available for {station}.")
+    feature_missingness = _feature_missingness_audit(
+        train,
+        categorical,
+        numeric,
+        max_missing_fraction=config.effective_max_feature_missing_fraction,
+    )
+    selected_missingness = {
+        row["feature"]: row["missing_fraction"]
+        for row in feature_missingness
+        if row["selected"]
+    }
+    threshold = config.effective_max_feature_missing_fraction
+    if threshold is not None and any(
+        fraction > threshold for fraction in selected_missingness.values()
+    ):
+        raise AssertionError(
+            "final refit selected a feature above max_feature_missing_fraction"
+        )
 
     base_models: dict[str, Any] = {}
     base_model_manifests: list[dict[str, Any]] = []
@@ -236,6 +261,7 @@ def export_station_model_weights(
         "training_profile": config.effective_training_profile,
         "training_population_required_features": training_population_required_features,
         "max_feature_missing_fraction": config.effective_max_feature_missing_fraction,
+        "feature_missingness": feature_missingness,
         "optuna_metric": config.effective_optuna_metric,
         "bucket_probability_policy": bucket_probability_policy,
         "bucket_contract": normalized_bucket_contract,
@@ -334,6 +360,13 @@ def export_station_model_weights(
             "categorical": fit_categorical,
             "numeric": fit_numeric,
             "all": feature_names,
+            "missingness_scope": "final_refit_training_rows_only",
+            "missingness_audit": feature_missingness,
+            "excluded_above_missingness_threshold": [
+                row["feature"]
+                for row in feature_missingness
+                if row["exclusion_reason"] == "above_missingness_threshold"
+            ],
         },
         "base_models": base_model_manifests,
         "stack_model": stack_manifest,
@@ -555,6 +588,21 @@ def _bucket_probability_policy(
             "residual_calibrator_method": residual_calibrator.get("method", STACK_METHOD),
             "live_output": "bucketProbabilities",
         }
+    if bucket_contract == CELSIUS_BUCKET_CONTRACT:
+        return {
+            "enabled": True,
+            "method": "normal_residual_interval_probability",
+            "bucket_rounding": CELSIUS_BUCKET_CONTRACT,
+            "bucket_unit": "celsius",
+            "bucket_width_c": 1.0,
+            "bucket_interval": "nearest integer Celsius, half-up",
+            "point_bucket": "floor(predictedHighC+0.5)",
+            "continuity_correction_c": 0.5,
+            "continuity_correction_f": 0.9,
+            "prediction_conversion": "predictedHighC=(predictedHighF-32)*5/9",
+            "residual_calibrator_method": residual_calibrator.get("method", STACK_METHOD),
+            "live_output": "bucketProbabilities",
+        }
     return {
         "enabled": True,
         "method": "normal_residual_interval_probability",
@@ -568,12 +616,55 @@ def _bucket_probability_policy(
 
 
 def _validated_bucket_contract(value: str) -> str:
-    contract = str(value or DEFAULT_BUCKET_CONTRACT).strip().lower()
-    if contract not in {DEFAULT_BUCKET_CONTRACT, HKO_BUCKET_CONTRACT}:
-        raise ValueError(
-            f"bucket_contract must be '{DEFAULT_BUCKET_CONTRACT}' or '{HKO_BUCKET_CONTRACT}'"
-        )
-    return contract
+    return validate_bucket_contract(value or DEFAULT_BUCKET_CONTRACT)
+
+
+def _feature_missingness_audit(
+    train: pd.DataFrame,
+    categorical: list[str],
+    numeric: list[str],
+    *,
+    max_missing_fraction: float | None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for kind, columns in (("categorical", categorical), ("numeric", numeric)):
+        for column in columns:
+            if column not in train:
+                missing_fraction = 1.0
+                non_null_rows = 0
+            else:
+                values = (
+                    pd.to_numeric(train[column], errors="coerce")
+                    if kind == "numeric"
+                    else train[column]
+                )
+                missing_fraction = float(values.isna().mean())
+                non_null_rows = int(values.notna().sum())
+            if max_missing_fraction is None:
+                selected = bool(column in train and (kind == "categorical" or non_null_rows > 0))
+            else:
+                selected = bool(
+                    non_null_rows > 0
+                    and missing_fraction <= float(max_missing_fraction)
+                )
+            if selected:
+                exclusion_reason = None
+            elif non_null_rows == 0:
+                exclusion_reason = "all_missing_or_absent"
+            else:
+                exclusion_reason = "above_missingness_threshold"
+            rows.append(
+                {
+                    "feature": column,
+                    "kind": kind,
+                    "train_rows": int(len(train)),
+                    "non_null_rows": non_null_rows,
+                    "missing_fraction": missing_fraction,
+                    "selected": selected,
+                    "exclusion_reason": exclusion_reason,
+                }
+            )
+    return sorted(rows, key=lambda row: (not row["selected"], row["feature"]))
 
 
 def _read_required_csv(path: Path) -> pd.DataFrame:

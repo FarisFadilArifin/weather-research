@@ -228,6 +228,18 @@ def build_asia_station_wide_dataset(
             observations[column] = pd.NA
     settlements["actual_high_f"] = pd.to_numeric(settlements["settlement_high_f"], errors="coerce")
     settlements["settlement_high_f"] = settlements["actual_high_f"]
+    native_celsius_columns: list[str] = []
+    if "settlement_high_c" in settlements:
+        settlements["settlement_high_c"] = pd.to_numeric(
+            settlements["settlement_high_c"], errors="coerce"
+        )
+        settlements["actual_high_c"] = settlements["settlement_high_c"]
+        settlements["actual_high_c_source"] = "settlement_high_c"
+        native_celsius_columns = [
+            "actual_high_c",
+            "settlement_high_c",
+            "actual_high_c_source",
+        ]
     settlements["target_source"] = "wunderground_only"
     settlements["actual_source"] = settlements.get("settlement_source", "wunderground_station_history")
     settlements["actual_data_quality_flag"] = settlements.get("quality_flag", "ok")
@@ -238,6 +250,7 @@ def build_asia_station_wide_dataset(
             "station_id",
             "actual_high_f",
             "settlement_high_f",
+            *native_celsius_columns,
             "settlement_source",
             "quality_flag",
             "target_source",

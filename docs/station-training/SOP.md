@@ -110,6 +110,11 @@ optional live-production export uses a separate model version, may include the
 latest completed actuals, and stays disabled until a clean source commit and
 separate release-provenance review are available.
 
+Before running a new station, follow `TEMPERATURE_UNITS_AND_BUCKETS.md` to set
+the native market bucket contract. Set the point missingness threshold to
+`0.03`. Recompute that gate on every fold and again on the exact evaluation or
+live refit population; never carry forward an earlier eligible-feature list.
+
 ## 6. Review training evidence
 
 Confirm:

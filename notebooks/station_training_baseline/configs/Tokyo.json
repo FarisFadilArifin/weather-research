@@ -14,6 +14,8 @@
   "point_source_pipeline_token": "source_pipeline=f\"notebooks/experiments/station_stacking_v20_asia_no_peak/{CITY_ID}\"",
   "point_model_version": "station_high_regressor_baseline_tokyo_no_peak_stack",
   "point_evaluation_train_years": [2022, 2025],
+  "point_bucket_contract": "polymarket_half_up_1c",
+  "point_max_feature_missing_fraction": 0.03,
   "point_live_model_version": "station_high_regressor_live_tokyo_no_peak_stack_2026",
   "probability_model_label": "Tokyo 1C Market Ordinal Probability Model",
   "probability_model_version": "station_bucket_baseline_tokyo_1c_market_ordinal",

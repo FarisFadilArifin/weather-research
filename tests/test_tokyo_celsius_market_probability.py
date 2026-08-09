@@ -78,6 +78,48 @@ def test_exact_celsius_bucket_and_offset_construction() -> None:
     assert row["actual_high_c_source"] == "actual_high_f_converted_to_c"
 
 
+def test_native_settlement_celsius_takes_priority_over_display_conversion() -> None:
+    date = pd.Timestamp("2025-01-01")
+    features = pd.DataFrame(
+        {
+            "contract_date": [date],
+            "actual_high_c": [32.8],
+            "gfs_high_f": [90.0],
+            "gefs_high_f": [90.0],
+            "jma_msm_high_f": [90.0],
+            "observed_temp_at_as_of_f": [86.0],
+            "observed_high_temp_through_as_of_f": [88.0],
+            "observed_as_of_age_minutes": [0.0],
+        }
+    )
+    point = pd.DataFrame(
+        {
+            "contract_date": [date],
+            "actual_high_f": [91.0],
+            "predicted_high_f": [89.24],
+        }
+    )
+    base = pd.DataFrame(
+        [
+            {"contract_date": date, "method": method, "predicted_high_f": 89.0}
+            for method in ("xgboost", "lightgbm", "catboost")
+        ]
+    )
+
+    row = build_celsius_probability_frame(
+        features,
+        point,
+        base,
+        include_peak_features=False,
+        feature_profile="asia_no_peak",
+    ).iloc[0]
+
+    assert row["actual_high_c"] == 32.8
+    assert row["actual_high_c_source"] == "actual_high_c"
+    assert row["actual_bucket_c"] == 33
+    assert row["point_bucket_c"] == 32
+
+
 def test_offset_mapping_is_exact_complete_and_recommends_maximum() -> None:
     offset = dict(zip(OFFSET_LABELS_C, (0.05, 0.10, 0.15, 0.20, 0.30, 0.10, 0.10), strict=True))
     tail = {

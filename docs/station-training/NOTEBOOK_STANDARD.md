@@ -124,7 +124,10 @@ Feature ablations select columns before fitting this pipeline.
 The point-model feature-missingness gate follows the same rule: calculate it on
 each applicable training fold, and apply it again on the frozen evaluation or
 live-production refit rows. Never export with a weaker missingness contract than
-the one used to select and evaluate the model.
+the one used to select and evaluate the model. Active station configs cap this
+at `0.03`; the final manifest must list each candidate feature's refit-window
+missingness and prove that every selected feature is at or below that threshold.
+See `TEMPERATURE_UNITS_AND_BUCKETS.md` for the unit, bucket, and refit checklist.
 
 ## KDAL three-arm probability contract
 

@@ -33,9 +33,9 @@ def _write_fixture(root: Path, city: str, station: str) -> None:
     dates = ["2022-07-03", "2022-07-04"]
     pd.DataFrame(
         [
-            {"station_id": station, "contract_date": dates[0], "settlement_high_f": 86.0, "settlement_source": "wunderground_station_history", "quality_flag": "ok"},
-            {"station_id": station, "contract_date": dates[1], "settlement_high_f": 87.8, "settlement_source": "wunderground_station_history", "quality_flag": "ok"},
-            {"station_id": station, "contract_date": dates[1], "settlement_high_f": 89.6, "settlement_source": "wunderground_station_history", "quality_flag": "ok"},
+            {"station_id": station, "contract_date": dates[0], "settlement_high_c": 30.0, "settlement_high_f": 86.0, "settlement_source": "wunderground_station_history", "quality_flag": "ok"},
+            {"station_id": station, "contract_date": dates[1], "settlement_high_c": 31.0, "settlement_high_f": 87.8, "settlement_source": "wunderground_station_history", "quality_flag": "ok"},
+            {"station_id": station, "contract_date": dates[1], "settlement_high_c": 32.0, "settlement_high_f": 89.6, "settlement_source": "wunderground_station_history", "quality_flag": "ok"},
         ]
     ).to_parquet(settlement_dir / "2022-07.parquet", index=False)
     pd.DataFrame(
@@ -126,6 +126,8 @@ def test_asia_builder_converts_and_deduplicates_fixture(tmp_path: Path) -> None:
 
     assert frame["contract_date"].tolist() == ["2022-07-03", "2022-07-04"]
     assert frame.loc[frame["contract_date"].eq("2022-07-04"), "actual_high_f"].iloc[0] == 89.6
+    assert frame.loc[frame["contract_date"].eq("2022-07-04"), "actual_high_c"].iloc[0] == 32.0
+    assert frame["actual_high_c_source"].eq("settlement_high_c").all()
     assert frame.loc[frame["contract_date"].eq("2022-07-03"), "gfs_high_f"].iloc[0] == 82.4
     assert frame.loc[frame["contract_date"].eq("2022-07-03"), "jma_msm_high_f"].iloc[0] == 82.4
     assert set(frame["station_id"]) == {"RJTT"}
@@ -161,6 +163,8 @@ def test_asia_point_model_excludes_final_same_day_iem_highs() -> None:
     selected = set(categorical) | set(numeric)
 
     assert "observed_high_temp_through_as_of_f" in selected
+    assert "actual_high_c" not in selected
+    assert "settlement_high_c" not in selected
     assert selected.isdisjoint(POINT_IN_TIME_UNSAFE_FEATURE_COLUMNS)
 
 

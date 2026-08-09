@@ -73,6 +73,12 @@ def test_kdal_baseline_is_one_self_contained_station_workflow() -> None:
     assert 'base_model_methods=("xgboost", "lightgbm", "catboost")' in source
     assert "run_station_year_split_experiment(config)" in source
     assert "POINT_EVALUATION_TRAIN_YEARS = (2021, 2025)" in source
+    assert 'POINT_BUCKET_CONTRACT = "polymarket_half_up_2f"' in source
+    assert "POINT_MAX_FEATURE_MISSING_FRACTION = 0.03" in source
+    assert "Point-model market-bucket hit rate" in source
+    assert "point_bucket_metrics(" in source
+    assert '"evaluation_status"] = "honest_forward"' in source
+    assert '"evaluation_status"] = "exploratory_holdout"' in source
     assert "train_years=POINT_EVALUATION_TRAIN_YEARS" in source
     assert (
         "max_feature_missing_fraction=config.effective_max_feature_missing_fraction"
@@ -116,6 +122,8 @@ def test_kdal_baseline_freezes_probability_chronology_and_metadata() -> None:
     assert 'period="holdout_2026"' in source
     assert metadata["station_id"] == "KDAL"
     assert metadata["point_evaluation_train_years"] == [2021, 2025]
+    assert metadata["point_bucket_contract"] == "polymarket_half_up_2f"
+    assert metadata["point_max_feature_missing_fraction"] == 0.03
     assert (
         metadata["point_live_model_version"]
         == "station_high_regressor_live_kdal_no_peak_stack_2026"
@@ -207,6 +215,11 @@ def test_seoul_and_tokyo_follow_station_baseline_contract() -> None:
             assert "export_probability_bundle(" in source
         assert "export_station_model_weights(" in source
         assert "POINT_EVALUATION_TRAIN_YEARS = (2022, 2025)" in source
+        assert 'POINT_BUCKET_CONTRACT = "polymarket_half_up_1c"' in source
+        assert "POINT_MAX_FEATURE_MISSING_FRACTION = 0.03" in source
+        assert "Point-model market-bucket hit rate" in source
+        assert "point_forward_bucket_metrics" in source
+        assert "point_holdout_bucket_metrics" in source
         assert "train_years=POINT_EVALUATION_TRAIN_YEARS" in source
         assert (
             "max_feature_missing_fraction=config.effective_max_feature_missing_fraction"
@@ -232,6 +245,8 @@ def test_seoul_and_tokyo_follow_station_baseline_contract() -> None:
         assert metadata["station_id"] == contract["station_id"]
         assert metadata["point_model_version"] == contract["model_version"]
         assert metadata["point_evaluation_train_years"] == contract["evaluation_years"]
+        assert metadata["point_bucket_contract"] == "polymarket_half_up_1c"
+        assert metadata["point_max_feature_missing_fraction"] == 0.03
         assert metadata["point_live_model_version"] == contract["live_model_version"]
         assert metadata["point_live_export_default"] is False
         assert metadata["probability_feature_profile"] == "asia_no_peak"

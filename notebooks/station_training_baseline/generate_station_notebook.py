@@ -44,6 +44,8 @@ def _load_config(path: Path) -> dict[str, Any]:
         "point_source_pipeline_token",
         "point_model_version",
         "point_evaluation_train_years",
+        "point_bucket_contract",
+        "point_max_feature_missing_fraction",
         "point_live_model_version",
         "probability_model_label",
         "probability_model_version",
@@ -77,6 +79,20 @@ def _load_config(path: Path) -> dict[str, Any]:
             "point evaluation training must end in the year before the holdout"
         )
     config["point_evaluation_train_years"] = list(evaluation_years)
+    bucket_contract = str(config["point_bucket_contract"]).strip().lower()
+    if bucket_contract not in {
+        "polymarket_half_up_1c",
+        "polymarket_half_up_2f",
+        "floor_1c",
+    }:
+        raise ValueError("point_bucket_contract is unsupported")
+    config["point_bucket_contract"] = bucket_contract
+    missingness_threshold = float(config["point_max_feature_missing_fraction"])
+    if not 0.0 <= missingness_threshold <= 0.03:
+        raise ValueError(
+            "point_max_feature_missing_fraction must be between 0 and 0.03"
+        )
+    config["point_max_feature_missing_fraction"] = missingness_threshold
     live_version = str(config["point_live_model_version"]).strip()
     if not live_version or live_version == str(config["point_model_version"]).strip():
         raise ValueError("point_live_model_version must be non-empty and distinct")
@@ -188,6 +204,12 @@ def _configure_point_workflow(
             optuna_settings,
             setting="optuna_settings",
         )
+    _replace_required(
+        notebook,
+        "    max_feature_missing_fraction=0.03,\n",
+        "    max_feature_missing_fraction=POINT_MAX_FEATURE_MISSING_FRACTION,\n",
+        setting="point_training_feature_missingness_gate",
+    )
     export_cells = [
         cell
         for cell in notebook["cells"]
@@ -209,6 +231,13 @@ def _configure_point_workflow(
         )
     _replace_required(
         notebook,
+        "        source_pipeline=",
+        "        bucket_contract=POINT_BUCKET_CONTRACT,\n"
+        "        source_pipeline=",
+        setting="point_export_bucket_contract",
+    )
+    _replace_required(
+        notebook,
         "        model_version=MODEL_VERSION,\n",
         "        model_version=MODEL_VERSION,\n"
         "        train_years=POINT_EVALUATION_TRAIN_YEARS,\n",
@@ -226,7 +255,13 @@ if EXPORT_MODEL_WEIGHTS:
     assert evaluation_point_manifest["model_version"] == MODEL_VERSION
     assert evaluation_point_manifest["training"]["train_start_year"] == POINT_EVALUATION_TRAIN_YEARS[0]
     assert evaluation_point_manifest["training"]["train_end_year"] == POINT_EVALUATION_TRAIN_YEARS[1]
-    assert evaluation_point_manifest["model_contract"]["max_feature_missing_fraction"] == config.effective_max_feature_missing_fraction
+    assert evaluation_point_manifest["model_contract"]["max_feature_missing_fraction"] == POINT_MAX_FEATURE_MISSING_FRACTION
+    assert evaluation_point_manifest["model_contract"]["bucket_contract"] == POINT_BUCKET_CONTRACT
+    assert all(
+        row["missing_fraction"] <= POINT_MAX_FEATURE_MISSING_FRACTION
+        for row in evaluation_point_manifest["features"]["missingness_audit"]
+        if row["selected"]
+    )
 """
     export_cells[0]["source"] = (
         export_source + export_verification
@@ -291,6 +326,9 @@ celsius_predictions.head()
         + "EXPORT_LIVE_MODEL_WEIGHTS = False\n"
         + "POINT_EVALUATION_TRAIN_YEARS = "
         + f'{tuple(config["point_evaluation_train_years"])!r}\n'
+        + f'POINT_BUCKET_CONTRACT = "{config["point_bucket_contract"]}"\n'
+        + "POINT_MAX_FEATURE_MISSING_FRACTION = "
+        + f'{float(config["point_max_feature_missing_fraction"])!r}\n'
         + f'LIVE_POINT_MODEL_VERSION = "{config["point_live_model_version"]}"\n'
         + f'PROBABILITY_MODEL_VERSION = "{config["probability_model_version"]}"\n'
         + market_settings
@@ -359,6 +397,7 @@ if EXPORT_LIVE_MODEL_WEIGHTS:
         base_model_methods=tuple(config.effective_base_model_methods),
         stack_enabled=config.stack_enabled,
         max_feature_missing_fraction=config.effective_max_feature_missing_fraction,
+        bucket_contract=POINT_BUCKET_CONTRACT,
         source_pipeline="{source_pipeline}",
     )
     assert live_exported_weights.bundle_path != exported_weights.bundle_path
@@ -373,6 +412,111 @@ else:
         ),
     ]
     notebook["cells"][export_index + 1 : export_index + 1] = live_cells
+
+    train_index = next(
+        index
+        for index, cell in enumerate(notebook["cells"])
+        if "result = run_station_year_split_experiment(config)" in "".join(
+            cell.get("source", [])
+        )
+    )
+    notebook["cells"][train_index + 1 : train_index + 1] = _point_bucket_cells(
+        config
+    )
+
+
+def _point_bucket_cells(config: dict[str, Any]) -> list[dict[str, Any]]:
+    contract = config["point_bucket_contract"]
+    if contract == "polymarket_half_up_1c":
+        description = "nearest whole Celsius degree using half-up rounding"
+    elif contract == "floor_1c":
+        description = "whole Celsius interval using floor rounding"
+    else:
+        description = "two-degree Fahrenheit bracket after half-up degree rounding"
+    return [
+        _markdown(
+            f"""## Point-model market-bucket hit rate
+
+This score belongs to the continuous point model, not the ordinal probability
+model. The configured market contract is `{contract}`: {description}.
+The forward score is honest chronological evidence. The holdout score is shown
+separately and remains exploratory.
+"""
+        ),
+        _code(
+            """from src.calibration.temperature_buckets import (
+    point_bucket_metrics,
+    point_bucket_predictions,
+)
+from src.calibration.v19_bucket import crossfit_ridge_predictions
+
+point_forward_predictions = crossfit_ridge_predictions(
+    result.validation_predictions,
+    providers=PROBABILITY_PROVIDERS,
+)
+point_forward_predictions = point_forward_predictions.loc[
+    point_forward_predictions["validation_year"].isin(
+        PROBABILITY_FORWARD_VALIDATION_YEARS
+    )
+].copy()
+assert not point_forward_predictions.empty
+assert (
+    point_forward_predictions["train_through_year"]
+    < point_forward_predictions["validation_year"]
+).all()
+
+point_forward_bucket_predictions = point_bucket_predictions(
+    point_forward_predictions,
+    POINT_BUCKET_CONTRACT,
+)
+point_forward_bucket_metrics = point_bucket_metrics(
+    point_forward_predictions,
+    POINT_BUCKET_CONTRACT,
+)
+point_forward_bucket_metrics["evaluation_status"] = "honest_forward"
+point_forward_bucket_metrics
+"""
+        ),
+        _code(
+            """point_holdout_predictions = result.test_predictions.loc[
+    result.test_predictions["method"].eq("ridge_stack"),
+    ["contract_date", "actual_high_f", "predicted_high_f"],
+].copy()
+assert not point_holdout_predictions.empty
+
+point_holdout_bucket_predictions = point_bucket_predictions(
+    point_holdout_predictions,
+    POINT_BUCKET_CONTRACT,
+)
+point_holdout_bucket_metrics = point_bucket_metrics(
+    point_holdout_predictions,
+    POINT_BUCKET_CONTRACT,
+)
+point_holdout_bucket_metrics["evaluation_status"] = "exploratory_holdout"
+point_holdout_bucket_metrics
+"""
+        ),
+        _code(
+            """point_bucket_output_dir = config.resolved_output_dir() / "point_bucket_evaluation"
+point_bucket_output_dir.mkdir(parents=True, exist_ok=True)
+point_forward_bucket_predictions.to_csv(
+    point_bucket_output_dir / f"{STATION_ID}_forward_predictions.csv", index=False
+)
+point_forward_bucket_metrics.to_csv(
+    point_bucket_output_dir / f"{STATION_ID}_forward_metrics.csv", index=False
+)
+point_holdout_bucket_predictions.to_csv(
+    point_bucket_output_dir / f"{STATION_ID}_{PROBABILITY_HOLDOUT_YEAR}_holdout_predictions.csv",
+    index=False,
+)
+point_holdout_bucket_metrics.to_csv(
+    point_bucket_output_dir / f"{STATION_ID}_{PROBABILITY_HOLDOUT_YEAR}_holdout_metrics.csv",
+    index=False,
+)
+point_bucket_output_dir
+"""
+        ),
+    ]
 
 
 def _celsius_market_probability_cells(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -401,11 +545,11 @@ model remains Fahrenheit-native.
   {validation_years} forward-validation rows only;
 - {holdout_year} remains exploratory and cannot select the model or policy.
 
-The source frame has no settlement-equivalent `actual_high_c` or
-`settlement_high_c` field. Its target is Wunderground `actual_high_f`, while
-`iem_daily_high_c` is diagnostic and a different source. Therefore the Celsius
-target uses the exact Fahrenheit-to-Celsius conversion fallback. This matches
-{market_city} Polymarket's integer Celsius settlement buckets without approximating the
+The target uses native settlement `actual_high_c` when the normalized settlement
+source provides it. Only if native Celsius is unavailable does it convert the
+matching Wunderground `actual_high_f`; `iem_daily_high_c` remains diagnostic and
+is never substituted as the settlement target. This matches {market_city}
+Polymarket's integer Celsius buckets without approximating the
 old 2°F distribution.
 """
         ),
@@ -440,7 +584,11 @@ celsius_target_contract = {
     "market": "__MARKET_CITY__ Polymarket whole 1C integer buckets",
     "rounding": "round_half_up(value) = floor(value + 0.5)",
     "target": TARGET_CONTRACT,
-    "actual_celsius_source_used": "actual_high_f_converted_to_c",
+    "actual_celsius_source_priority": [
+        "actual_high_c",
+        "settlement_high_c",
+        "actual_high_f_converted_to_c",
+    ],
     "excluded_diagnostic_source": "iem_daily_high_c",
     "ordered_offset_classes_c": list(OFFSET_LABELS_C),
     "tail_contract": "training-supported exact offsets within <=-3 and >=+3",
@@ -471,9 +619,12 @@ celsius_training_frame = build_celsius_probability_frame(
     include_peak_features=False,
     feature_profile=PROBABILITY_FEATURE_PROFILE,
 )
-assert celsius_training_frame["actual_high_c_source"].eq(
-    "actual_high_f_converted_to_c"
+assert celsius_training_frame["actual_high_c_source"].isin(
+    {"actual_high_c", "settlement_high_c", "actual_high_f_converted_to_c"}
 ).all()
+assert not celsius_training_frame["actual_high_c_source"].eq(
+    "iem_daily_high_c"
+).any()
 celsius_bundle, celsius_forward_predictions, celsius_tuning = (
     fit_celsius_probability_system(
         celsius_training_frame,
@@ -1022,6 +1173,10 @@ def build_notebook(config: dict[str, Any]) -> dict[str, Any]:
         "point_model_version": config["point_model_version"],
         "point_evaluation_train_years": list(
             config["point_evaluation_train_years"]
+        ),
+        "point_bucket_contract": config["point_bucket_contract"],
+        "point_max_feature_missing_fraction": float(
+            config["point_max_feature_missing_fraction"]
         ),
         "point_live_model_version": config["point_live_model_version"],
         "point_live_export_default": False,
