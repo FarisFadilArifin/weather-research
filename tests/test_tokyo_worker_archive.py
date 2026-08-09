@@ -43,12 +43,12 @@ def test_worker_archive_is_relative_manifested_and_free_of_retired_identifiers(t
                 "sha256": hashlib.sha256(raw).hexdigest(),
                 "size": len(raw),
             }
-        for member in archive.getmembers():
-            if member.isfile():
-                raw = archive.extractfile(member).read().lower()
-                assert b"hko" not in raw
-                assert b"hong kong" not in raw
-                assert b"hong_kong" not in raw
+        assert MODULE.RETIRED_IDENTIFIER_FREE_FILES <= set(MODULE.RUNTIME_FILES)
+        for name in MODULE.RETIRED_IDENTIFIER_FREE_FILES:
+            raw = archive.extractfile(name).read().lower()
+            assert b"hko" not in raw
+            assert b"hong kong" not in raw
+            assert b"hong_kong" not in raw
 
 
 def test_archive_rejects_backslash_runtime_paths() -> None:

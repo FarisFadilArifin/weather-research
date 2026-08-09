@@ -6,8 +6,10 @@ import pytest
 
 from src.tokyo_runtime_package import (
     EXPECTED_REPLAY,
+    MODEL_RUNTIME_PACKAGES,
     RUNTIME_CONTRACT_SHA256,
     validate_contract,
+    validate_model_runtime_versions,
     validate_replay,
 )
 
@@ -81,3 +83,18 @@ def test_runtime_contract_requires_exact_manifest_feature_order():
     manifest["features"]["all"].reverse()
     with pytest.raises(ValueError, match="bundle_manifest_feature_order_mismatch"):
         validate_contract(bundle, manifest)
+
+
+def test_promotion_rejects_model_trained_with_different_runtime_packages():
+    expected = {package: "1.0" for package in MODEL_RUNTIME_PACKAGES}
+    manifest = {
+        "package_runtime_compatibility": {"package_versions": dict(expected)}
+    }
+    validate_model_runtime_versions(manifest, expected)
+
+    manifest["package_runtime_compatibility"]["package_versions"]["scikit-learn"] = "1.1"
+    with pytest.raises(
+        ValueError,
+        match=r"model_runtime_package_mismatch:scikit-learn:1\.1!=1\.0",
+    ):
+        validate_model_runtime_versions(manifest, expected)

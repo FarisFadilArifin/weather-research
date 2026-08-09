@@ -17,6 +17,9 @@ TIMING_MODE = "asia_same_day_11am_live_safe"
 PROVIDERS = ("gfs", "gefs", "jma_msm")
 TARGET_SOURCE = "wunderground_only"
 PREDICTION_UNIT = "celsius"
+MODEL_RUNTIME_PACKAGES = frozenset(
+    {"catboost", "joblib", "lightgbm", "numpy", "pandas", "scikit-learn", "xgboost"}
+)
 POINT_IN_TIME_UNSAFE_FEATURES = frozenset({"iem_daily_high_f", "iem_daily_high_c"})
 RUNTIME_CONTRACT_SHA256 = (
     "178006146855e2685d81fb3b9ce40c5475ae8f472aa81ac1335d7a2b493c5f33"
@@ -93,6 +96,32 @@ def validate_contract(bundle: dict[str, Any], manifest: dict[str, Any]) -> None:
     leaked = sorted(POINT_IN_TIME_UNSAFE_FEATURES.intersection(bundle_features))
     if leaked:
         raise ValueError("point_in_time_unsafe_features:" + ",".join(leaked))
+
+
+def validate_model_runtime_versions(
+    manifest: dict[str, Any], runtime_versions: dict[str, str]
+) -> None:
+    compatibility = manifest.get("package_runtime_compatibility") or {}
+    source_versions = compatibility.get("package_versions") or {}
+    if not isinstance(source_versions, dict):
+        raise ValueError("source_package_versions_missing")
+    missing = sorted(MODEL_RUNTIME_PACKAGES - set(source_versions))
+    if missing:
+        raise ValueError("source_package_versions_missing:" + ",".join(missing))
+    runtime_missing = sorted(MODEL_RUNTIME_PACKAGES - set(runtime_versions))
+    if runtime_missing:
+        raise ValueError("runtime_package_versions_missing:" + ",".join(runtime_missing))
+    mismatches = sorted(
+        package
+        for package in MODEL_RUNTIME_PACKAGES
+        if str(source_versions[package]) != str(runtime_versions[package])
+    )
+    if mismatches:
+        details = ",".join(
+            f"{package}:{source_versions[package]}!={runtime_versions[package]}"
+            for package in mismatches
+        )
+        raise ValueError("model_runtime_package_mismatch:" + details)
 
 
 def predict_high_f(bundle: dict[str, Any], row: Any) -> float:

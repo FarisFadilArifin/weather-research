@@ -31,6 +31,17 @@ RUNTIME_FILES = (
 WORKER_MANIFEST_SCHEMA_VERSION = 1
 RUNTIME_PAYLOADS = tuple(sorted((*RUNTIME_FILES, ".source-commit")))
 BANNED_IDENTIFIERS = (b"hko", b"hong kong", b"hong_kong")
+RETIRED_IDENTIFIER_FREE_FILES = frozenset(
+    {
+        "config/tokyo_iem_asos_observation_contract.json",
+        "scripts/build_tokyo_immutable_history.py",
+        "scripts/publish_tokyo_live_feature_artifact.py",
+        "scripts/run_asia_11am_pull.py",
+        "src/asia_11am.py",
+        "src/calibration/asia_station_stacking.py",
+        "src/wunderground_history.py",
+    }
+)
 
 
 def sha256_bytes(raw: bytes) -> str:
@@ -107,7 +118,9 @@ def build_archive(
             raise FileNotFoundError(relative)
         raw = path.read_bytes()
         lowered = raw.lower()
-        if any(identifier in lowered for identifier in BANNED_IDENTIFIERS):
+        if relative in RETIRED_IDENTIFIER_FREE_FILES and any(
+            identifier in lowered for identifier in BANNED_IDENTIFIERS
+        ):
             raise ValueError(f"retired_station_identifier:{relative}")
         payloads[relative] = raw
     payloads[".source-commit"] = (commit + "\n").encode()

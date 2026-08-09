@@ -16,6 +16,7 @@ from src.tokyo_runtime_package import (
     git_identity,
     sha256_file,
     validate_contract,
+    validate_model_runtime_versions,
     validate_replay,
 )
 
@@ -50,8 +51,10 @@ def main() -> int:
     if identity.git_dirty:
         raise SystemExit("refusing export: source worktree is dirty")
 
-    source_bundle = joblib.load(args.source_bundle)
     source_manifest = json.loads(args.source_manifest.read_text(encoding="utf-8"))
+    runtime_versions = runtime_package_versions(root)
+    validate_model_runtime_versions(source_manifest, runtime_versions)
+    source_bundle = joblib.load(args.source_bundle)
     validate_contract(source_bundle, source_manifest)
     replay = validate_replay(args.replay_summary)
 
@@ -80,9 +83,7 @@ def main() -> int:
     manifest["package_runtime_compatibility"]["runtime_contract_sha256"] = (
         RUNTIME_CONTRACT_SHA256
     )
-    manifest["package_runtime_compatibility"]["package_versions"] = (
-        runtime_package_versions(root)
-    )
+    manifest["package_runtime_compatibility"]["package_versions"] = runtime_versions
     manifest["package_runtime_compatibility"]["feature_pipeline"] = FEATURE_PIPELINE
     manifest.setdefault("model_contract", {})["prediction_temperature_unit"] = PREDICTION_UNIT
     manifest["promotion"] = {

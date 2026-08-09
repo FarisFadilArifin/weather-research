@@ -5,7 +5,9 @@ import io
 import json
 import math
 import os
+import random
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, time as datetime_time, timedelta
@@ -33,22 +35,6 @@ from .direct_nwp_fetch import (
     direct_nwp_file_url,
     extract_direct_nwp_run_feature_points,
 )
-from .hong_kong_11am import (
-    IEM_ASOS_URL,
-    IEM_FIELDS,
-    _atomic_write_frame,
-    _atomic_write_json,
-    _content_addressed_raw_path,
-    _request,
-    _sha256_bytes,
-    _sha256_file,
-)
-from .settlement_actuals import (
-    WeatherCompanyStationHistoryClient,
-    backfill_wunderground_station_history,
-)
-
-
 DEFAULT_DATA_ROOT = Path("data/calibration/asia_11am")
 START_DATE = date(2022, 7, 3)
 AS_OF_HOUR_LOCAL = 11
@@ -62,7 +48,13 @@ GFS_ARCHIVE = "https://noaa-gfs-bdp-pds.s3.amazonaws.com"
 GEFS_ARCHIVE = "https://noaa-gefs-pds.s3.amazonaws.com"
 _GEFS_CFGRIB_LOCK = Lock()
 JMA_HISTORY_URL = "https://previous-runs-api.open-meteo.com/v1/forecast"
-AWC_METAR_URL = "https://aviationweather.gov/api/data/metar"
+IEM_ASOS_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
+IEM_FIELDS = (
+    "tmpf", "dwpf", "drct", "sknt", "p01i", "alti", "mslp", "vsby",
+    "gust", "skyc1", "skyc2", "skyc3", "skyc4", "skyl1", "skyl2",
+    "skyl3", "skyl4", "wxcodes", "peak_wind_gust", "peak_wind_drct",
+    "peak_wind_time", "metar",
+)
 IEM_CLEAR_WEATHER_SENTINEL = "NONE"
 _METAR_PRESENT_WEATHER_TOKEN = re.compile(
     r"^(?:[+-]|VC)?(?:MI|BC|PR|DR|BL|SH|TS|FZ)?"
@@ -100,6 +92,102 @@ JMA_BASE_FIELDS = (
 JMA_REQUIRED_LIVE_FIELDS = tuple(
     field for field in JMA_BASE_FIELDS if field != "wind_gusts_10m"
 )
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (date, datetime, pd.Timestamp)):
+        return value.isoformat()
+    if value is pd.NA or (isinstance(value, float) and math.isnan(value)):
+        return None
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f"Not JSON serializable: {type(value)!r}")
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(text, encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _atomic_write_json(path: Path, payload: Mapping[str, Any] | Sequence[Any]) -> None:
+    _atomic_write_text(
+        path, json.dumps(payload, indent=2, sort_keys=True, default=_json_default)
+    )
+
+
+def _atomic_write_frame(path: Path, frame: pd.DataFrame) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    if path.suffix.lower() == ".parquet":
+        frame.to_parquet(temporary, index=False)
+    else:
+        frame.to_csv(temporary, index=False)
+    os.replace(temporary, path)
+
+
+def _sha256_bytes(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _request(
+    url: str,
+    *,
+    params: Mapping[str, Any] | Sequence[tuple[str, Any]] | None = None,
+    timeout: int = 90,
+    attempts: int = 6,
+) -> requests.Response:
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                timeout=timeout,
+                headers={"User-Agent": "weather-research-asia-11am/0.1"},
+            )
+            if response.status_code == 429 or response.status_code >= 500:
+                retry_after = response.headers.get("Retry-After")
+                delay = (
+                    float(retry_after)
+                    if retry_after and retry_after.isdigit()
+                    else min(60.0, 2**attempt)
+                )
+                time.sleep(delay + random.random())
+                continue
+            response.raise_for_status()
+            return response
+        except requests.HTTPError as exc:
+            if exc.response is not None and 400 <= exc.response.status_code < 500:
+                raise
+            last_error = exc
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            last_error = exc
+        if attempt < attempts:
+            time.sleep(min(60.0, 2**attempt) + random.random())
+    raise RuntimeError(f"GET failed after {attempts} attempts: {url}: {last_error}") from last_error
+
+
+def _content_addressed_raw_path(
+    directory: Path, stem: str, content: bytes, suffix: str
+) -> Path:
+    checksum = _sha256_bytes(content)
+    path = directory / f"{stem}_{checksum[:12]}{suffix}"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temporary.write_bytes(content)
+        os.replace(temporary, path)
+    return path
 
 
 @dataclass(frozen=True)
