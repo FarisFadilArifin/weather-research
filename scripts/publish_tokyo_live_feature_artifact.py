@@ -435,12 +435,38 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def collection_not_due(day: date, current: datetime) -> tuple[bool, datetime]:
+    profile = CITY_PROFILES["tokyo"]
+    local_now = current.astimezone(ZoneInfo(profile.timezone))
+    cutoff = datetime.combine(
+        day,
+        datetime.min.time().replace(
+            hour=profile.as_of_hour_local,
+            minute=profile.live_delay_minutes,
+        ),
+        tzinfo=ZoneInfo(profile.timezone),
+    )
+    return local_now.date() == day and local_now < cutoff, cutoff
+
+
 def main() -> int:
     args = parse_args()
     project_root = Path(__file__).resolve().parents[1]
     current = datetime.now(UTC)
     day = args.contract_date or current.astimezone(ZoneInfo("Asia/Tokyo")).date()
     if not args.skip_live_pull:
+        not_due, cutoff = collection_not_due(day, current)
+        if not_due:
+            print(
+                json.dumps(
+                    {
+                        "status": "not_due",
+                        "contractDate": day.isoformat(),
+                        "collectionNotBefore": cutoff.isoformat(),
+                    }
+                )
+            )
+            return 0
         result = run_live(
             args.data_root,
             [CITY_PROFILES["tokyo"]],

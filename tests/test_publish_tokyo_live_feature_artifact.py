@@ -74,6 +74,21 @@ def provider_contract() -> dict[str, object]:
     }
 
 
+def test_collection_before_live_window_is_successful_not_due():
+    not_due, cutoff = MODULE.collection_not_due(
+        date(2026, 8, 10), datetime(2026, 8, 10, 1, 50, tzinfo=UTC)
+    )
+    assert not_due is True
+    assert cutoff.isoformat() == "2026-08-10T11:10:00+09:00"
+
+
+def test_collection_at_live_window_is_due():
+    not_due, _cutoff = MODULE.collection_not_due(
+        date(2026, 8, 10), datetime(2026, 8, 10, 2, 10, tzinfo=UTC)
+    )
+    assert not_due is False
+
+
 def archive_identity(commit: str = "a" * 40) -> dict[str, str]:
     return {
         "cleanCommit": commit,
