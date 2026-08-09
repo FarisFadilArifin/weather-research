@@ -29,6 +29,9 @@ def history_frame() -> pd.DataFrame:
                 "truth_finalized": True,
                 "observed_source": "iem_asos_global_metar",
                 "observed_data_source": "iem_asos_global_metar_raw",
+                "observed_temp_at_as_of_f": 78.0,
+                "observed_high_temp_through_as_of_f": 80.0,
+                "observed_as_of_age_minutes": 5.0,
                 "observed_humidity_at_as_of": 74.0,
                 "observed_precip_recent_at_as_of": 0.03,
                 "observed_visibility_at_as_of": 6.0,
@@ -120,3 +123,23 @@ def test_history_seed_requires_finalized_truth_and_calendar_month_missingness_li
     missing_provider.loc[0, "gfs_high_f"] = None
     with pytest.raises(ValueError, match="history_required_values_missing:gfs_high_f"):
         build(missing_provider, tmp_path / "provider")
+
+
+def test_station_training_export_normalizes_only_live_history_inputs() -> None:
+    source = history_frame().drop(columns=["truth_source", "truth_finalized"]).copy()
+    source["settlement_source"] = "wunderground_station_history"
+    source["strict_quality_ok"] = True
+    source["actual_high_f"] = [86.0, 84.0]
+
+    normalized = MODULE.station_training_history_frame(
+        source,
+        start_date=date(2026, 8, 6),
+        end_date=date(2026, 8, 7),
+        truth_column="actual_high_c",
+    )
+
+    assert len(normalized) == 2
+    assert normalized["truth_finalized"].all()
+    assert normalized["truth_source"].eq("wunderground_station_history").all()
+    assert "actual_high_f" not in normalized
+    assert "observed_weather_code_at_as_of" not in normalized

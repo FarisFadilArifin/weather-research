@@ -18,10 +18,12 @@ STATION_ID = "RJTT"
 OBSERVATION_PROVIDER = "iem_asos_global_metar"
 FORECAST_PROVIDERS = ("gfs", "gefs", "jma_msm")
 REQUIRED_OBSERVATION_FIELDS = (
-    "observed_humidity_at_as_of",
-    "observed_precip_recent_at_as_of",
-    "observed_visibility_at_as_of",
-    "observed_weather_code_at_as_of",
+    "observed_temp_at_as_of_f",
+    "observed_high_temp_through_as_of_f",
+    "observed_as_of_age_minutes",
+)
+APPROVED_TRUTH_SOURCES = frozenset(
+    {"weather_underground_history", "wunderground_station_history"}
 )
 REQUIRED_FEATURE_MAX_MISSINGNESS = 0.0
 OPTIONAL_FEATURE_MAX_MISSINGNESS_PER_CALENDAR_MONTH = 0.5
@@ -115,6 +117,71 @@ def _expected_dates(start_date: date, end_date: date) -> list[str]:
     return values
 
 
+def station_training_history_frame(
+    frame: pd.DataFrame,
+    *,
+    start_date: date,
+    end_date: date,
+    truth_column: str,
+) -> pd.DataFrame:
+    """Select the immutable, target-safe history contract from a training export."""
+    required = {
+        "station_id",
+        "contract_date",
+        truth_column,
+        "observed_source",
+        "observed_data_source",
+        "strict_quality_ok",
+        *REQUIRED_OBSERVATION_FIELDS,
+        *(f"{provider}_high_f" for provider in FORECAST_PROVIDERS),
+    }
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError("station_training_history_columns_missing:" + ",".join(missing))
+    truth_source_column = next(
+        (
+            name
+            for name in ("settlement_source", "actual_source", "target_source")
+            if name in frame.columns
+        ),
+        None,
+    )
+    if truth_source_column is None:
+        raise ValueError("station_training_truth_source_missing")
+
+    working = frame.copy()
+    parsed_dates = pd.to_datetime(working["contract_date"], errors="coerce").dt.date
+    if parsed_dates.isna().any():
+        raise ValueError("invalid_contract_date")
+    working["contract_date"] = parsed_dates
+    working = working.loc[
+        working["contract_date"].between(start_date, end_date, inclusive="both")
+    ].copy()
+    if working.empty:
+        raise ValueError("station_training_history_range_empty")
+    if not working["strict_quality_ok"].map(
+        lambda value: value is True or str(value).strip().lower() == "true"
+    ).all():
+        raise ValueError("station_training_history_quality_gate_failed")
+    truth_sources = working[truth_source_column].astype(str).str.strip()
+    if not truth_sources.isin(APPROVED_TRUTH_SOURCES).all():
+        raise ValueError("station_training_truth_source_mismatch")
+
+    columns = [
+        "station_id",
+        "contract_date",
+        truth_column,
+        "observed_source",
+        "observed_data_source",
+        *REQUIRED_OBSERVATION_FIELDS,
+        *(f"{provider}_high_f" for provider in FORECAST_PROVIDERS),
+    ]
+    result = working[columns].copy()
+    result["truth_source"] = truth_sources
+    result["truth_finalized"] = True
+    return result
+
+
 def _calendar_month_readiness(
     working: pd.DataFrame,
     *,
@@ -138,9 +205,6 @@ def _calendar_month_readiness(
             for field in required_feature_columns
             if field != "observed_weather_code_at_as_of"
         }
-        required_missingness["observed_weather_code_at_as_of"] = float(
-            group["observed_weather_code_at_as_of"].map(_nonempty_text).eq(False).mean()
-        )
         optional_missingness = {
             field: float(group[field].map(lambda value: _clean(value) is None).mean())
             for field in optional_columns
@@ -249,9 +313,7 @@ def validate_history(
         raise ValueError("history_truth_not_finalized")
 
     required_numeric = [truth_column, *(f"{provider}_high_f" for provider in providers)]
-    required_numeric.extend(
-        field for field in REQUIRED_OBSERVATION_FIELDS if field != "observed_weather_code_at_as_of"
-    )
+    required_numeric.extend(REQUIRED_OBSERVATION_FIELDS)
     missing = [
         field
         for field in required_numeric
@@ -259,16 +321,13 @@ def validate_history(
     ]
     if missing:
         raise ValueError("history_required_values_missing:" + ",".join(sorted(missing)))
-    if not working["observed_weather_code_at_as_of"].map(_nonempty_text).all():
-        raise ValueError("history_required_values_missing:observed_weather_code_at_as_of")
-
     feature_columns = sorted(
         name
         for name in working.columns
         if name not in TARGET_COLUMNS and name not in METADATA_COLUMNS
     )
     required_feature_columns = sorted(
-        set(required_numeric + ["observed_weather_code_at_as_of"])
+        set(required_numeric)
     )
     calendar_month_readiness = _calendar_month_readiness(
         working,
@@ -444,6 +503,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-date", type=date.fromisoformat, required=True)
     parser.add_argument("--end-date", type=date.fromisoformat, required=True)
     parser.add_argument("--truth-column", default="actual_high_c")
+    parser.add_argument(
+        "--input-kind",
+        choices=("history", "station_training_features"),
+        default="history",
+    )
     parser.add_argument("--archive-manifest", type=Path)
     return parser.parse_args()
 
@@ -457,8 +521,16 @@ def main() -> int:
         if manifest.get("sourceCommit") != _clean_git_commit(project_root):
             raise ValueError("worker_archive_commit_mismatch")
         archive_sha = sha256_file(args.archive_manifest)
+    frame = _read_frame(args.input)
+    if args.input_kind == "station_training_features":
+        frame = station_training_history_frame(
+            frame,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            truth_column=args.truth_column,
+        )
     report = build_history_seed(
-        _read_frame(args.input),
+        frame,
         args.output_dir,
         start_date=args.start_date,
         end_date=args.end_date,
