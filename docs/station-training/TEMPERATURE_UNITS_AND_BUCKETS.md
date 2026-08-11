@@ -336,9 +336,13 @@ The missingness calculation must be repeated independently for:
 3. the frozen evaluation refit, using exactly its configured refit years; and
 4. an optional live refit, using every completed row included in that refit.
 
-Never copy the eligible feature list from an earlier fold or evaluation refit.
-If a feature was 2.8% missing through 2025 but becomes 3.2% missing after adding
-2026 rows, it must be excluded from the all-data live refit.
+Folds and the frozen evaluation refit select features independently. The live
+refit is the exception: it must reuse the evaluation manifest's exact ordered
+feature contract so research and live inference have identical dimensionality.
+It still recomputes missingness on the complete live-refit population. If any
+frozen feature was 2.8% missing through 2025 but becomes 3.2% missing after
+adding 2026 rows, the live export must fail closed; it must not silently remove
+that feature or replace it with a newly eligible feature.
 
 This rule does not prohibit using all completed rows. It prohibits fitting on
 all completed rows **with a feature whose missingness on those same rows exceeds
@@ -493,7 +497,10 @@ These are different artifacts:
 The live export must:
 
 - have a distinct model version;
-- recompute the 3% gate on its complete refit population;
+- reuse the evaluation manifest's exact ordered feature contract;
+- recompute the 3% audit on its complete refit population and fail closed if a
+  frozen feature violates the gate;
+- never add newly eligible features during the refit;
 - record a new missingness audit and bundle hash;
 - remain disabled by default in the notebook; and
 - never claim the already-inspected rows as fresh out-of-sample evidence.
@@ -695,7 +702,9 @@ experiment-generator tests. Before handoff:
 - [ ] The threshold is explicitly `0.03` or stricter.
 - [ ] Missingness is computed on training rows only.
 - [ ] Numeric coercion happens before missingness calculation.
-- [ ] Eligibility is recomputed for every fold and final refit.
+- [ ] Eligibility is recomputed for every fold and evaluation refit.
+- [ ] A live refit preserves the evaluation feature order/count and revalidates
+      every frozen feature against the complete refit population.
 - [ ] Imputation happens after feature eligibility.
 - [ ] The final manifest lists selected and rejected feature audits.
 - [ ] No selected final-refit feature exceeds 3% missingness.
@@ -719,7 +728,8 @@ experiment-generator tests. Before handoff:
 | Use Python `round()` for a half-up market | Uses bankers rounding at `.5` | Use `floor(x + 0.5)` |
 | Report a 2°F bracket score for Tokyo | Measures a different classification target | Use `polymarket_half_up_1c` |
 | Calculate missingness on train plus validation | Validation data influences feature selection | Calculate on the fold's training rows only |
-| Reuse the 2025 feature list for an all-data live refit | New rows may move features above 3% | Recompute eligibility on all live-refit rows |
+| Recompute live selection and admit newly dense features | Research/live dimensionality drifts | Freeze the evaluation feature contract and revalidate it on all live-refit rows |
+| Keep a frozen live feature after it exceeds 3% missingness | The refit violates its data-quality contract | Fail the live export and investigate the feature source |
 | Impute first, then calculate missingness | Makes every imputed column appear complete | Gate raw/coerced training values before imputation |
 | Add native settlement Celsius as a numeric feature | Direct target leakage | Preserve it only as target metadata |
 | Train a stack on all validation predictions and score the same rows | Meta-model leakage | Cross-fit the stack by validation year |
