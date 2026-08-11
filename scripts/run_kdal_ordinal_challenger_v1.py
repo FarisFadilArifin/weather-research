@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 import sys
@@ -101,10 +102,32 @@ def _json_safe(value):
     return value
 
 
-def run_challenger() -> dict[str, object]:
+def run_challenger(
+    *,
+    point_model_version: str = POINT_MODEL_VERSION,
+    point_bundle_path: Path | None = None,
+    output_dir: Path = OUTPUT_DIR,
+) -> dict[str, object]:
     """Train, evaluate, and export the three frozen KDAL ordinal arms."""
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    import joblib
+
+    output = Path(output_dir).resolve()
+    output.mkdir(parents=True, exist_ok=True)
     development, holdout, paths = build_frames(PROJECT_ROOT)
+    selected_point_bundle = Path(
+        point_bundle_path or paths["point_bundle"]
+    ).resolve()
+    if not selected_point_bundle.is_file():
+        raise FileNotFoundError(
+            f"point bundle is missing: {selected_point_bundle}"
+        )
+    point_bundle = joblib.load(selected_point_bundle)
+    if not isinstance(point_bundle, dict) or point_bundle.get(
+        "model_version"
+    ) != point_model_version:
+        raise ValueError(
+            "point bundle model_version does not match point_model_version"
+        )
     development = development.loc[
         development["year"].between(2023, 2025)
     ].copy()
@@ -193,10 +216,10 @@ def run_challenger() -> dict[str, object]:
             },
         }
         bundle_path, manifest_path = export_frozen_candidate(
-            OUTPUT_DIR / "model_weights",
+            output / "model_weights",
             station_id=STATION_ID,
-            point_model_version=POINT_MODEL_VERSION,
-            point_bundle_path=paths["point_bundle"],
+            point_model_version=point_model_version,
+            point_bundle_path=selected_point_bundle,
             config=config,
             state=state,
             policy=policy,
@@ -218,7 +241,7 @@ def run_challenger() -> dict[str, object]:
             str(bundle_path.relative_to(PROJECT_ROOT))
         )
         serialize_prediction_columns(holdout_predictions).to_csv(
-            OUTPUT_DIR / f"{candidate_name}_2026_exploratory_predictions.csv",
+            output / f"{candidate_name}_2026_exploratory_predictions.csv",
             index=False,
         )
         candidate_comparison.append(
@@ -253,33 +276,34 @@ def run_challenger() -> dict[str, object]:
 
     comparison = pd.DataFrame(candidate_comparison)
     serialize_prediction_columns(forward).to_csv(
-        OUTPUT_DIR / "KDAL_nested_forward_predictions.csv",
+        output / "KDAL_nested_forward_predictions.csv",
         index=False,
     )
     selections.to_csv(
-        OUTPUT_DIR / "KDAL_nested_forward_selections.csv", index=False
+        output / "KDAL_nested_forward_selections.csv", index=False
     )
     outer_tuning.to_csv(
-        OUTPUT_DIR / "KDAL_nested_outer_tuning.csv", index=False
+        output / "KDAL_nested_outer_tuning.csv", index=False
     )
     forward_by_year.to_csv(
-        OUTPUT_DIR / "KDAL_nested_forward_metrics_by_year.csv",
+        output / "KDAL_nested_forward_metrics_by_year.csv",
         index=False,
     )
     final_tuning.to_csv(
-        OUTPUT_DIR / "KDAL_final_inner_tuning.csv", index=False
+        output / "KDAL_final_inner_tuning.csv", index=False
     )
     frozen_rows.to_csv(
-        OUTPUT_DIR / "KDAL_frozen_candidate_configs.csv", index=False
+        output / "KDAL_frozen_candidate_configs.csv", index=False
     )
     comparison.to_csv(
-        OUTPUT_DIR / "KDAL_2026_exploratory_candidate_comparison.csv",
+        output / "KDAL_2026_exploratory_candidate_comparison.csv",
         index=False,
     )
     summary = {
         "experiment": "kdal_ordinal_challenger_v1",
         "station_id": STATION_ID,
-        "point_model_version": POINT_MODEL_VERSION,
+        "point_model_version": point_model_version,
+        "point_bundle_sha256": sha256_file(selected_point_bundle),
         "historical_selection_primary_metric": "bucket_log_loss",
         "historical_selection_secondary_metric": "ranked_probability_score",
         "feature_sets": ["market_core_21", "compact_27", "full_59"],
@@ -302,7 +326,7 @@ def run_challenger() -> dict[str, object]:
         "promotion_approved": False,
         "promotion_blocker": "fresh_shadow_data_required",
     }
-    (OUTPUT_DIR / "KDAL_summary.json").write_text(
+    (output / "KDAL_summary.json").write_text(
         json.dumps(_json_safe(summary), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
@@ -318,12 +342,21 @@ def run_challenger() -> dict[str, object]:
             PROJECT_ROOT / relative_path
             for relative_path in frozen_manifests
         ],
-        "output_dir": OUTPUT_DIR,
+        "output_dir": output,
     }
 
 
 def main() -> int:
-    result = run_challenger()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--point-model-version", default=POINT_MODEL_VERSION)
+    parser.add_argument("--point-bundle", type=Path)
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
+    args = parser.parse_args()
+    result = run_challenger(
+        point_model_version=args.point_model_version,
+        point_bundle_path=args.point_bundle,
+        output_dir=args.output_dir,
+    )
     print(json.dumps(_json_safe(result["summary"]), indent=2, sort_keys=True))
     print(result["comparison"].to_string(index=False))
     return 0

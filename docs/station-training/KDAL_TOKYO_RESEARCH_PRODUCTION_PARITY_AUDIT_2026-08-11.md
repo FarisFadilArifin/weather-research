@@ -34,10 +34,12 @@ These hashes are expected to differ because a valid live refit uses more
 completed training rows even while preserving the same feature contract.
 
 All 198 evaluated KDAL features are a subset of the released 230-feature bundle.
-The 32 live-only features came from recomputing feature eligibility on the larger
-refit population. They are mainly wind/ceiling observations, since-11-AM change
-features, heat-index/wind-chill fields, and v4/v8 precipitation, cloud, wind, and
-dewpoint interactions. This was selection drift, not a different source CSV.
+The 32 live-only features were admitted by the older release's refit-selection
+implementation. Re-evaluating the same immutable source CSV with the current
+clean source rejects all 32 above the 3% threshold even without freezing the
+list. They are mainly wind/ceiling observations, since-11-AM change features,
+heat-index/wind-chill fields, and v4/v8 precipitation, cloud, wind, and dewpoint
+interactions. This was source/refit selection drift, not a different source CSV.
 
 ## Frozen-refit viability check
 
