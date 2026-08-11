@@ -233,6 +233,7 @@ def run_challenger(
                 ),
             },
             candidate_name=candidate_name,
+            candidate_role=str(row["candidate_role"]),
         )
         frozen_manifests.append(
             str(manifest_path.relative_to(PROJECT_ROOT))

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+
+import joblib
 import numpy as np
 import pandas as pd
 
@@ -13,12 +16,57 @@ from src.calibration.bucket_probability import (
     predict_probability_bundle,
 )
 from src.calibration.kdal_ordinal_challenger import (
+    ChallengerConfig,
     FROZEN_CANDIDATE_ROLES,
+    POLICY_VERSION,
     apply_no_override_policy,
+    export_frozen_candidate,
     feature_sets,
     frozen_candidate_rows,
     tune_no_override_policy,
 )
+
+
+def test_exported_candidate_contains_production_ensemble_contract(tmp_path) -> None:
+    point_bundle = tmp_path / "point.joblib"
+    point_bundle.write_bytes(b"point")
+    bundle_path, manifest_path = export_frozen_candidate(
+        tmp_path / "out",
+        station_id="KDAL",
+        point_model_version="point-v1",
+        point_bundle_path=point_bundle,
+        config=ChallengerConfig(
+            family="empirical",
+            feature_set="test",
+            c=0.0,
+            class_weight=None,
+            temperature=1.0,
+            model_weight=0.5,
+            prior_strength=30.0,
+        ),
+        state={
+            "feature_names": ["feature_a", "feature_b"],
+            "model_state": {},
+            "empirical_state": {},
+            "tail_policy": {},
+            "training_start": "2023-01-01",
+            "training_cutoff": "2025-12-31",
+            "training_rows": 1,
+        },
+        policy={
+            "minimum_top_probability": 0.525,
+            "minimum_top_two_margin": 0.2,
+        },
+        historical_metrics={},
+        candidate_name="candidate-v1",
+        candidate_role="blended_ordinal",
+    )
+    bundle = joblib.load(bundle_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for value in (bundle, manifest):
+        assert value["candidate_role"] == "blended_ordinal"
+        assert value["ordered_features"] == value["feature_names"]
+        assert value["decision_thresholds"]["policy_version"] == POLICY_VERSION
 
 
 def test_shared_slope_ordinal_model_returns_valid_probabilities() -> None:

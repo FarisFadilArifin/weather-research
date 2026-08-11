@@ -45,6 +45,7 @@ TEMPERATURES = (0.75, 1.0, 1.25, 1.5, 2.0)
 PRIOR_STRENGTHS = (15.0, 30.0, 60.0)
 CALIBRATION_DAYS = 90
 FRESH_SHADOW_START = "2026-07-31"
+POLICY_VERSION = "kdal_ordinal_two_of_three_v1"
 FROZEN_CANDIDATE_ROLES = (
     "blended_ordinal",
     "shared_slope_ordinal",
@@ -692,20 +693,28 @@ def export_frozen_candidate(
     policy: Mapping[str, Any],
     historical_metrics: Mapping[str, Any],
     candidate_name: str,
+    candidate_role: str,
 ) -> tuple[Path, Path]:
     import joblib
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
+    if candidate_role not in FROZEN_CANDIDATE_ROLES:
+        raise ValueError(f"unsupported frozen candidate role: {candidate_role}")
+    decision_thresholds = dict(policy)
+    decision_thresholds["policy_version"] = POLICY_VERSION
+    feature_names = list(state["feature_names"])
     bundle = {
         "schema_version": 1,
         "artifact_type": "station_ordinal_probability_challenger",
         "station_id": station_id,
         "model_version": candidate_name,
+        "candidate_role": candidate_role,
         "point_model_version": point_model_version,
         "point_bundle_sha256": sha256_file(point_bundle_path),
         "feature_profile": FEATURE_PROFILE_COMMON_NO_PEAK,
-        "feature_names": list(state["feature_names"]),
+        "feature_names": feature_names,
+        "ordered_features": feature_names,
         "mandatory_source_features": list(MANDATORY_SOURCE_FEATURES),
         "offset_labels": list(OFFSET_LABELS),
         "selected_family": config.family,
@@ -719,7 +728,7 @@ def export_frozen_candidate(
         "empirical_prior_strength": config.prior_strength,
         "empirical_state": state["empirical_state"],
         "tail_policy": state["tail_policy"],
-        "decision_thresholds": dict(policy),
+        "decision_thresholds": decision_thresholds,
         "overrides_enabled": False,
         "training_start": state["training_start"],
         "training_cutoff": state["training_cutoff"],
