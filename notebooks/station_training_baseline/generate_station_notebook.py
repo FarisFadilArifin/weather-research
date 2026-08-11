@@ -321,9 +321,13 @@ celsius_predictions.head()
         if config.get("probability_target") == "celsius_market_1c"
         else ""
     )
+    if "import os\n" not in setup:
+        setup = setup.replace("from pathlib import Path\n", "import os\nfrom pathlib import Path\n", 1)
     probability_settings = (
         marker
-        + "EXPORT_LIVE_MODEL_WEIGHTS = False\n"
+        + "EXPORT_LIVE_MODEL_WEIGHTS = (\n"
+        + "    os.environ.get(\"STATION_TRAINING_EXPORT_LIVE_MODEL_WEIGHTS\", \"0\") == \"1\"\n"
+        + ")\n"
         + "POINT_EVALUATION_TRAIN_YEARS = "
         + f'{tuple(config["point_evaluation_train_years"])!r}\n'
         + f'POINT_BUCKET_CONTRACT = "{config["point_bucket_contract"]}"\n'
