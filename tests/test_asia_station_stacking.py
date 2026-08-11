@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from src.calibration.asia_station_stacking import (
     ASIA_PROVIDERS,
@@ -137,7 +138,7 @@ def _write_fixture(root: Path, city: str, station: str) -> None:
                     "wind_speed_ms_10m": 2.0,
                     "wind_direction_deg_10m": 180.0,
                     "wind_gust_ms": 3.0,
-                    "precip_mm_1h": 0.0,
+                    "precip_mm_1h": 1.0 if hour == 8 else 2.0,
                     "cloud_cover_pct": 20.0,
                     "forecast_as_of_utc": f"{day}T02:00:00Z",
                     "issued_at_utc": f"{day}T00:00:00Z",
@@ -175,7 +176,7 @@ def _write_fixture(root: Path, city: str, station: str) -> None:
                     "wind_speed_10m_kmh": 8.0,
                     "wind_direction_10m_deg": 180.0,
                     "wind_gusts_10m_kmh": 12.0,
-                    "precipitation_mm": 0.0,
+                    "precipitation_mm": 0.5 if hour == 11 else 1.5,
                     "cloud_cover_pct": 20.0,
                     "forecast_as_of_utc": f"{day}T02:00:00Z",
                     "issued_at_utc": f"{day}T00:00:00Z",
@@ -197,8 +198,58 @@ def test_asia_builder_converts_and_deduplicates_fixture(tmp_path: Path) -> None:
     assert frame["actual_high_c_source"].eq("settlement_high_c").all()
     assert frame.loc[frame["contract_date"].eq("2022-07-03"), "gfs_high_f"].iloc[0] == 82.4
     assert frame.loc[frame["contract_date"].eq("2022-07-03"), "jma_msm_high_f"].iloc[0] == 82.4
+    row = frame.loc[frame["contract_date"].eq("2022-07-03")].iloc[0]
+    expected_optional = {
+        "gfs_dewpoint_mean_f": 64.4,
+        "gfs_humidity_mean": 60.0,
+        "gfs_wind_speed_mean": 2.0,
+        "gfs_wind_speed_max": 2.0,
+        "gfs_wind_direction_mean": 180.0,
+        "gfs_wind_gust_max": 3.0,
+        "gfs_forecast_precip_total_mm": 3.0,
+        "gfs_forecast_precip_max_1h_mm": 2.0,
+        "gfs_forecast_precip_hours_count": 2.0,
+        "gfs_cloud_cover_mean": 20.0,
+        "gfs_cloud_cover_max": 20.0,
+        "jma_msm_dewpoint_mean_f": 64.4,
+        "jma_msm_humidity_mean": 60.0,
+        "jma_msm_wind_speed_mean": 8.0,
+        "jma_msm_wind_speed_max": 8.0,
+        "jma_msm_wind_direction_mean": 180.0,
+        "jma_msm_wind_gust_max": 12.0,
+        "jma_msm_forecast_precip_total_mm": 2.0,
+        "jma_msm_forecast_precip_max_1h_mm": 1.5,
+        "jma_msm_forecast_precip_hours_count": 2.0,
+        "jma_msm_cloud_cover_mean": 20.0,
+        "jma_msm_cloud_cover_max": 20.0,
+    }
+    for column, expected in expected_optional.items():
+        assert row[column] == pytest.approx(expected), column
     assert set(frame["station_id"]) == {"RJTT"}
     assert frame["strict_quality_ok"].all()
+
+
+def test_asia_builder_rejects_physically_invalid_optional_provider_fields(
+    tmp_path: Path,
+) -> None:
+    _write_fixture(tmp_path, "tokyo", "RJTT")
+    gfs_path = (
+        tmp_path
+        / "normalized"
+        / "forecasts"
+        / "gfs"
+        / "tokyo"
+        / "2022-07.parquet"
+    )
+    gfs = pd.read_parquet(gfs_path)
+    gfs.loc[0, "relative_humidity_pct_2m"] = 150.0
+    gfs.to_parquet(gfs_path, index=False)
+
+    with pytest.raises(
+        ValueError,
+        match="provider_optional_field_out_of_bounds:gfs:relative_humidity_pct_2m:percentage",
+    ):
+        build_asia_station_wide_dataset(tmp_path, "tokyo")
 
 
 def test_asia_folds_start_with_available_history() -> None:

@@ -84,7 +84,7 @@ def test_kdal_baseline_is_one_self_contained_station_workflow() -> None:
         "max_feature_missing_fraction=config.effective_max_feature_missing_fraction"
         in source
     )
-    assert "EXPORT_LIVE_MODEL_WEIGHTS = False" in source
+    assert 'os.environ.get("STATION_TRAINING_EXPORT_LIVE_MODEL_WEIGHTS", "0") == "1"' in source
     assert "LIVE_POINT_MODEL_VERSION != MODEL_VERSION" in source
     assert "frozen_feature_names=frozen_point_feature_names" in source
     assert '"selection_mode"] == "frozen_evaluation_contract"' in source
@@ -228,7 +228,7 @@ def test_seoul_and_tokyo_follow_station_baseline_contract() -> None:
             "max_feature_missing_fraction=config.effective_max_feature_missing_fraction"
             in source
         )
-        assert "EXPORT_LIVE_MODEL_WEIGHTS = False" in source
+        assert 'os.environ.get("STATION_TRAINING_EXPORT_LIVE_MODEL_WEIGHTS", "0") == "1"' in source
         assert f'LIVE_POINT_MODEL_VERSION = "{contract["live_model_version"]}"' in source
         assert "train_years=None" in source
         assert "frozen_feature_names=frozen_point_feature_names" in source

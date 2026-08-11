@@ -92,6 +92,38 @@ def _f_to_fahrenheit(values: pd.Series) -> pd.Series:
     return pd.to_numeric(values, errors="coerce") * 9.0 / 5.0 + 32.0
 
 
+_OPTIONAL_FIELD_BOUNDS: dict[str, tuple[float, float]] = {
+    "temperature_c": (-100.0, 70.0),
+    "percentage": (0.0, 100.0),
+    "wind_speed": (0.0, 500.0),
+    "direction_degrees": (0.0, 360.0),
+    "precipitation_mm": (0.0, 500.0),
+}
+
+
+def _normalized_optional_provider_field(
+    values: pd.Series,
+    *,
+    provider: str,
+    column: str,
+    dimension: str,
+) -> pd.Series:
+    numeric = pd.to_numeric(values, errors="coerce")
+    try:
+        minimum, maximum = _OPTIONAL_FIELD_BOUNDS[dimension]
+    except KeyError as exc:
+        raise ValueError(f"unsupported optional-field dimension: {dimension}") from exc
+    invalid = numeric.notna() & ((numeric < minimum) | (numeric > maximum))
+    if invalid.any():
+        raise ValueError(
+            "provider_optional_field_out_of_bounds:"
+            f"{provider}:{column}:{dimension}"
+        )
+    if dimension == "temperature_c":
+        return _f_to_fahrenheit(numeric)
+    return numeric
+
+
 def _provider_summary(
     frame: pd.DataFrame,
     *,
@@ -127,26 +159,34 @@ def _provider_summary(
         f"{provider}_forecast_hour_max": (forecast_hour_column, "max"),
     }
     optional = {
-        f"{provider}_dewpoint_mean_f": (dewpoint_column, "mean", True),
-        f"{provider}_humidity_mean": (humidity_column, "mean", False),
-        f"{provider}_wind_speed_mean": (wind_speed_column, "mean", False),
-        f"{provider}_wind_speed_max": (wind_speed_column, "max", False),
-        f"{provider}_wind_direction_mean": (wind_direction_column, "mean", False),
-        f"{provider}_wind_gust_max": (wind_gust_column, "max", False),
-        f"{provider}_forecast_precip_total_mm": (precipitation_column, "sum", False),
-        f"{provider}_forecast_precip_max_1h_mm": (precipitation_column, "max", False),
-        f"{provider}_forecast_precip_hours_count": (precipitation_column, lambda values: values.gt(0).sum(), False),
-        f"{provider}_cloud_cover_mean": (cloud_column, "mean", False),
-        f"{provider}_cloud_cover_max": (cloud_column, "max", False),
+        f"{provider}_dewpoint_mean_f": (dewpoint_column, "mean", "temperature_c"),
+        f"{provider}_humidity_mean": (humidity_column, "mean", "percentage"),
+        f"{provider}_wind_speed_mean": (wind_speed_column, "mean", "wind_speed"),
+        f"{provider}_wind_speed_max": (wind_speed_column, "max", "wind_speed"),
+        f"{provider}_wind_direction_mean": (wind_direction_column, "mean", "direction_degrees"),
+        f"{provider}_wind_gust_max": (wind_gust_column, "max", "wind_speed"),
+        f"{provider}_forecast_precip_total_mm": (precipitation_column, "sum", "precipitation_mm"),
+        f"{provider}_forecast_precip_max_1h_mm": (precipitation_column, "max", "precipitation_mm"),
+        f"{provider}_forecast_precip_hours_count": (precipitation_column, lambda values: values.gt(0).sum(), "precipitation_mm"),
+        f"{provider}_cloud_cover_mean": (cloud_column, "mean", "percentage"),
+        f"{provider}_cloud_cover_max": (cloud_column, "max", "percentage"),
     }
-    for output, (column, function, *is_dewpoint) in optional.items():
+    normalized_columns: dict[tuple[str, str], str] = {}
+    for output, (column, function, dimension) in optional.items():
         if column is None or column not in work:
             continue
-        if is_dewpoint:
-            work[column] = _f_to_fahrenheit(work[column])
-        else:
-            work[column] = pd.to_numeric(work[column], errors="coerce")
-        aggregations[output] = (column, function)
+        key = (column, dimension)
+        normalized_column = normalized_columns.get(key)
+        if normalized_column is None:
+            normalized_column = f"_optional_{len(normalized_columns)}"
+            work[normalized_column] = _normalized_optional_provider_field(
+                work[column],
+                provider=provider,
+                column=column,
+                dimension=dimension,
+            )
+            normalized_columns[key] = normalized_column
+        aggregations[output] = (normalized_column, function)
 
     grouped = work.groupby("contract_date", as_index=False).agg(**aggregations)
     grouped[f"{provider}_forecast_window_hours"] = (
