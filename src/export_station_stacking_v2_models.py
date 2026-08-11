@@ -92,6 +92,8 @@ def export_station_model_weights(
     observation_target_same_station: bool = True,
     observation_source: str = "default",
     city_id: str | None = None,
+    frozen_feature_names: tuple[str, ...] | list[str] | None = None,
+    feature_contract_source: dict[str, Any] | None = None,
 ) -> ExportedModelWeights:
     root = Path(project_root).resolve()
     station = station_id.upper()
@@ -143,13 +145,15 @@ def export_station_model_weights(
     if train.empty:
         raise ValueError(f"No training rows available for {station} in requested year range.")
 
-    fit_categorical, fit_numeric = _fit_feature_columns(
-        train,
-        categorical,
-        numeric,
-        max_missing_fraction=config.effective_max_feature_missing_fraction,
+    fit_categorical, fit_numeric, feature_names, feature_selection_mode = (
+        _select_refit_feature_columns(
+            train,
+            categorical,
+            numeric,
+            max_missing_fraction=config.effective_max_feature_missing_fraction,
+            frozen_feature_names=frozen_feature_names,
+        )
     )
-    feature_names = [*fit_categorical, *fit_numeric]
     if not feature_names:
         raise ValueError(f"No non-empty feature columns available for {station}.")
     feature_missingness = _feature_missingness_audit(
@@ -157,6 +161,7 @@ def export_station_model_weights(
         categorical,
         numeric,
         max_missing_fraction=config.effective_max_feature_missing_fraction,
+        selected_features=(feature_names if frozen_feature_names is not None else None),
     )
     selected_missingness = {
         row["feature"]: row["missing_fraction"]
@@ -170,6 +175,7 @@ def export_station_model_weights(
         raise AssertionError(
             "final refit selected a feature above max_feature_missing_fraction"
         )
+    feature_contract_sha256 = _feature_contract_sha256(feature_names)
 
     base_models: dict[str, Any] = {}
     base_model_manifests: list[dict[str, Any]] = []
@@ -262,6 +268,12 @@ def export_station_model_weights(
         "training_population_required_features": training_population_required_features,
         "max_feature_missing_fraction": config.effective_max_feature_missing_fraction,
         "feature_missingness": feature_missingness,
+        "feature_contract": {
+            "selection_mode": feature_selection_mode,
+            "feature_count": len(feature_names),
+            "ordered_features_sha256": feature_contract_sha256,
+            "source": feature_contract_source,
+        },
         "optuna_metric": config.effective_optuna_metric,
         "bucket_probability_policy": bucket_probability_policy,
         "bucket_contract": normalized_bucket_contract,
@@ -292,7 +304,7 @@ def export_station_model_weights(
         "source_identity": _git_identity(root),
         "package_runtime_compatibility": {
             "runtime_contract": "requirements-ml-runtime.txt",
-            "python": ">=3.11",
+            "python": ">=3.12",
             "feature_pipeline": resolved_feature_pipeline,
             "package_versions": _runtime_package_versions(),
         },
@@ -315,6 +327,10 @@ def export_station_model_weights(
             "stack_enabled": bool(stack_enabled),
             "final_model_method": final_model_method,
             "bucket_contract": normalized_bucket_contract,
+            "feature_selection_mode": feature_selection_mode,
+            "feature_count": len(feature_names),
+            "ordered_features_sha256": feature_contract_sha256,
+            "feature_contract_source": feature_contract_source,
         },
         "training": {
             "mode": training_mode,
@@ -360,12 +376,21 @@ def export_station_model_weights(
             "categorical": fit_categorical,
             "numeric": fit_numeric,
             "all": feature_names,
+            "selection_mode": feature_selection_mode,
+            "feature_count": len(feature_names),
+            "ordered_features_sha256": feature_contract_sha256,
+            "contract_source": feature_contract_source,
             "missingness_scope": "final_refit_training_rows_only",
             "missingness_audit": feature_missingness,
             "excluded_above_missingness_threshold": [
                 row["feature"]
                 for row in feature_missingness
                 if row["exclusion_reason"] == "above_missingness_threshold"
+            ],
+            "excluded_by_frozen_contract": [
+                row["feature"]
+                for row in feature_missingness
+                if row["exclusion_reason"] == "not_in_frozen_feature_contract"
             ],
         },
         "base_models": base_model_manifests,
@@ -619,14 +644,96 @@ def _validated_bucket_contract(value: str) -> str:
     return validate_bucket_contract(value or DEFAULT_BUCKET_CONTRACT)
 
 
+def _feature_contract_sha256(feature_names: list[str] | tuple[str, ...]) -> str:
+    payload = json.dumps(
+        list(feature_names),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _select_refit_feature_columns(
+    train: pd.DataFrame,
+    categorical: list[str],
+    numeric: list[str],
+    *,
+    max_missing_fraction: float | None,
+    frozen_feature_names: tuple[str, ...] | list[str] | None,
+) -> tuple[list[str], list[str], list[str], str]:
+    eligible_categorical, eligible_numeric = _fit_feature_columns(
+        train,
+        categorical,
+        numeric,
+        max_missing_fraction=max_missing_fraction,
+    )
+    if frozen_feature_names is None:
+        feature_names = [*eligible_categorical, *eligible_numeric]
+        return (
+            eligible_categorical,
+            eligible_numeric,
+            feature_names,
+            "refit_missingness_gate",
+        )
+
+    feature_names = [str(feature) for feature in frozen_feature_names]
+    if not feature_names:
+        raise ValueError("frozen_feature_names must not be empty")
+    duplicate_features = sorted(
+        feature for feature in set(feature_names) if feature_names.count(feature) > 1
+    )
+    if duplicate_features:
+        raise ValueError(
+            "frozen feature contract contains duplicates: "
+            + ", ".join(duplicate_features)
+        )
+
+    candidate_features = set(categorical) | set(numeric)
+    unknown_features = [
+        feature for feature in feature_names if feature not in candidate_features
+    ]
+    if unknown_features:
+        raise ValueError(
+            "frozen feature contract contains unknown features: "
+            + ", ".join(unknown_features)
+        )
+
+    eligible_features = set(eligible_categorical) | set(eligible_numeric)
+    ineligible_features = [
+        feature for feature in feature_names if feature not in eligible_features
+    ]
+    if ineligible_features:
+        threshold = (
+            "no missingness threshold"
+            if max_missing_fraction is None
+            else f"max missing fraction {float(max_missing_fraction):.6f}"
+        )
+        raise ValueError(
+            "frozen feature contract is not viable on the refit population under "
+            f"{threshold}: " + ", ".join(ineligible_features)
+        )
+
+    categorical_set = set(categorical)
+    numeric_set = set(numeric)
+    fit_categorical = [
+        feature for feature in feature_names if feature in categorical_set
+    ]
+    fit_numeric = [feature for feature in feature_names if feature in numeric_set]
+    return fit_categorical, fit_numeric, feature_names, "frozen_evaluation_contract"
+
+
 def _feature_missingness_audit(
     train: pd.DataFrame,
     categorical: list[str],
     numeric: list[str],
     *,
     max_missing_fraction: float | None,
+    selected_features: list[str] | tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    frozen_selection = (
+        set(selected_features) if selected_features is not None else None
+    )
     for kind, columns in (("categorical", categorical), ("numeric", numeric)):
         for column in columns:
             if column not in train:
@@ -641,18 +748,27 @@ def _feature_missingness_audit(
                 missing_fraction = float(values.isna().mean())
                 non_null_rows = int(values.notna().sum())
             if max_missing_fraction is None:
-                selected = bool(column in train and (kind == "categorical" or non_null_rows > 0))
+                eligible = bool(
+                    column in train and (kind == "categorical" or non_null_rows > 0)
+                )
             else:
-                selected = bool(
+                eligible = bool(
                     non_null_rows > 0
                     and missing_fraction <= float(max_missing_fraction)
                 )
+            selected = eligible and (
+                frozen_selection is None or column in frozen_selection
+            )
             if selected:
                 exclusion_reason = None
             elif non_null_rows == 0:
                 exclusion_reason = "all_missing_or_absent"
-            else:
+            elif not eligible:
                 exclusion_reason = "above_missingness_threshold"
+            elif frozen_selection is not None:
+                exclusion_reason = "not_in_frozen_feature_contract"
+            else:
+                exclusion_reason = None
             rows.append(
                 {
                     "feature": column,
@@ -660,6 +776,7 @@ def _feature_missingness_audit(
                     "train_rows": int(len(train)),
                     "non_null_rows": non_null_rows,
                     "missing_fraction": missing_fraction,
+                    "eligible_by_missingness": eligible,
                     "selected": selected,
                     "exclusion_reason": exclusion_reason,
                 }

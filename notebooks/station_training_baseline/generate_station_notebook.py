@@ -372,14 +372,25 @@ celsius_predictions.head()
 The evaluation bundle above is frozen before the exploratory holdout and is the
 only point bundle used by probability training and holdout reporting. A live
 production refit may use all completed actuals, including completed holdout-year
-dates, but it has a distinct version and cannot claim holdout performance as
-out-of-sample evidence. Keep this export disabled until the source is committed;
-then create the immutable release record in a separate promotion review.
+dates, but it must reuse the evaluation bundle's exact ordered feature contract.
+The exporter fails closed if any frozen feature is absent or violates the refit
+missingness guard; it never adds newly eligible columns. The live refit has a
+distinct version and cannot claim holdout performance as out-of-sample evidence.
+Keep this export disabled until the source is committed; then create the
+immutable release record in a separate promotion review.
 """
         ),
         _code(
             f"""live_exported_weights = None
 if EXPORT_LIVE_MODEL_WEIGHTS:
+    assert EXPORT_MODEL_WEIGHTS
+    frozen_point_feature_names = tuple(evaluation_point_manifest["features"]["all"])
+    frozen_point_feature_source = {{
+        "kind": "evaluation_manifest",
+        "model_version": evaluation_point_manifest["model_version"],
+        "bundle_sha256": evaluation_point_manifest["artifact_integrity"]["bundle_sha256"],
+        "ordered_features_sha256": evaluation_point_manifest["features"]["ordered_features_sha256"],
+    }}
     live_exported_weights = export_station_model_weights(
         project_root=PROJECT_ROOT,
         station_id=STATION_ID,
@@ -399,9 +410,21 @@ if EXPORT_LIVE_MODEL_WEIGHTS:
         max_feature_missing_fraction=config.effective_max_feature_missing_fraction,
         bucket_contract=POINT_BUCKET_CONTRACT,
         source_pipeline="{source_pipeline}",
+        frozen_feature_names=frozen_point_feature_names,
+        feature_contract_source=frozen_point_feature_source,
     )
     assert live_exported_weights.bundle_path != exported_weights.bundle_path
     assert LIVE_POINT_MODEL_VERSION != MODEL_VERSION
+    live_point_manifest = _point_export_json.loads(
+        live_exported_weights.manifest_path.read_text(encoding="utf-8")
+    )
+    assert live_point_manifest["features"]["selection_mode"] == "frozen_evaluation_contract"
+    assert live_point_manifest["features"]["all"] == list(frozen_point_feature_names)
+    assert live_point_manifest["features"]["feature_count"] == len(frozen_point_feature_names)
+    assert (
+        live_point_manifest["features"]["ordered_features_sha256"]
+        == evaluation_point_manifest["features"]["ordered_features_sha256"]
+    )
     print(
         "Live bundle exported as an unreleased candidate. "
         "Create a clean-checkout release record before promotion."

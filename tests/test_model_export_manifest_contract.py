@@ -4,6 +4,7 @@ import hashlib
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.calibration.station_stacking import StationStackingConfig
 from src.export_station_stacking_v2_models import (
@@ -12,10 +13,12 @@ from src.export_station_stacking_v2_models import (
     _base_prediction_transform,
     _bucket_probability_policy,
     _feature_pipeline_name,
+    _feature_contract_sha256,
     _feature_missingness_audit,
     _git_identity,
     _ridge_residual_calibrator,
     _runtime_package_versions,
+    _select_refit_feature_columns,
     _sha256_file,
 )
 
@@ -85,6 +88,65 @@ def test_final_refit_missingness_audit_enforces_three_percent_boundary() -> None
     assert by_feature["accepted"]["missing_fraction"] == 0.03
     assert by_feature["rejected"]["selected"] is False
     assert by_feature["rejected"]["exclusion_reason"] == "above_missingness_threshold"
+
+
+def test_frozen_refit_contract_preserves_exact_order_and_excludes_new_features() -> None:
+    train = pd.DataFrame(
+        {
+            "category": ["a", "b", "a", "b"],
+            "research_first": [1.0, 2.0, 3.0, 4.0],
+            "newly_dense": [5.0, 6.0, 7.0, 8.0],
+            "research_last": [9.0, 10.0, 11.0, 12.0],
+        }
+    )
+    frozen = ["category", "research_last", "research_first"]
+
+    categorical, numeric, feature_names, mode = _select_refit_feature_columns(
+        train,
+        ["category"],
+        ["research_first", "newly_dense", "research_last"],
+        max_missing_fraction=0.03,
+        frozen_feature_names=frozen,
+    )
+    audit = _feature_missingness_audit(
+        train,
+        ["category"],
+        ["research_first", "newly_dense", "research_last"],
+        max_missing_fraction=0.03,
+        selected_features=feature_names,
+    )
+    by_feature = {row["feature"]: row for row in audit}
+
+    assert feature_names == frozen
+    assert categorical == ["category"]
+    assert numeric == ["research_last", "research_first"]
+    assert mode == "frozen_evaluation_contract"
+    assert by_feature["newly_dense"]["selected"] is False
+    assert (
+        by_feature["newly_dense"]["exclusion_reason"]
+        == "not_in_frozen_feature_contract"
+    )
+    assert _feature_contract_sha256(frozen) != _feature_contract_sha256(
+        list(reversed(frozen))
+    )
+
+
+def test_frozen_refit_contract_fails_when_research_feature_breaks_density_guard() -> None:
+    train = pd.DataFrame(
+        {
+            "stable": [1.0] * 100,
+            "drifted": [np.nan] * 4 + [1.0] * 96,
+        }
+    )
+
+    with pytest.raises(ValueError, match="drifted"):
+        _select_refit_feature_columns(
+            train,
+            [],
+            ["stable", "drifted"],
+            max_missing_fraction=0.03,
+            frozen_feature_names=["stable", "drifted"],
+        )
 
 
 def test_cross_station_remaining_delta_export_does_not_clamp_to_observation() -> None:

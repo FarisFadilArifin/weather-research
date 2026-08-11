@@ -1,7 +1,17 @@
-catboost==1.2.10
+# Shared direct ML/acquisition contract for research export and production.
+# Production provisions the fully hashed CPython 3.12 Linux closure from its
+# requirements-ml-runtime.lock; research must use these same direct versions.
+pandas==3.0.5
+numpy==2.5.1
+requests==2.34.2
+xarray==2026.7.0
+cfgrib==0.9.15.1
+eccodes==2.47.0
+ecmwflibs==0.7.0
+scikit-learn==1.9.0
 joblib==1.5.3
-lightgbm==4.6.0
-numpy==2.4.6
-pandas==3.0.3
-scikit-learn==1.8.0
-xgboost==3.2.0
+xgboost==3.3.0
+lightgbm==4.7.0
+catboost==1.2.10
+mostlyrightmd[research]==1.17.0
+mostlyrightmd-weather[nwp]==1.17.0
