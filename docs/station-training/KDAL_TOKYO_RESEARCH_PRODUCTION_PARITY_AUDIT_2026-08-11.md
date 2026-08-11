@@ -92,9 +92,23 @@ contract after release.
 
 ## Release status
 
-This patch does not alter the active production artifact or trading mode. KDAL
-will remain on the released 230-feature bundle until the research changes are
-committed, the live refit is exported from a clean checkout, the new bundle and
-manifest pass cross-runtime parity and route validation, and the production
-release registry is updated through the normal deployment review. Tokyo needs no
-artifact replacement for feature or package parity.
+The clean 198-feature KDAL point refit is now exported as
+`station_high_regressor_live_kdal_no_peak_stack_2026_198f`, bundle SHA-256
+`ed32f088fc1891633e75d9e475e453750077666f037659c7d46b0ed8a39a1142`.
+It produced exactly identical predictions on all 2,036 audit rows under the
+Windows research runtime and locked Linux production runtime.
+
+The three-member ordinal ensemble was retrained under CPython 3.12.3 and
+scikit-learn 1.9.0 against that point lineage. Its 6,108 cross-platform model
+evaluations had no structural or decision differences; the maximum numeric
+difference was `4.579669976578771e-16`, below the frozen `1e-12` equivalence
+tolerance.
+
+Production packaging is complete on `codex/kdal-198-production-package` as an
+immutable eight-file candidate. The candidate remains fail-closed with
+`promotion_approved=false`, `deploymentAllowed=false`, and
+`promotion_blocker=fresh_shadow_data_required`. The active production artifact,
+route, trading mode, and release registry were not changed. KDAL therefore
+continues to use the released 230-feature bundle until fresh shadow evidence is
+reviewed and an operator explicitly approves promotion. Tokyo needs no artifact
+replacement for feature or package parity.
