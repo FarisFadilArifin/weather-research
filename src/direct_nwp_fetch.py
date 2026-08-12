@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import logging
@@ -398,6 +399,7 @@ def _nearest_point_indexers(ds: Any, stations: dict[str, dict[str, float]]) -> d
         lon_values = np.asarray(lonv.values)
         for station_code, station in stations.items():
             longitude = float(station["lon"]) % 360
+
             out[station_code] = {
                 lat_dim: int(np.abs(lat_values - float(station["lat"])).argmin()),
                 lon_dim: int(np.abs(lon_values - longitude).argmin()),

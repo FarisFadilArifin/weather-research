@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -9,9 +10,75 @@ import pytest
 
 from src.calibration.asia_station_stacking import (
     ASIA_PROVIDERS,
+    IEM_ASOS_METAR_PROVIDER,
+    _validate_live_iem_observation,
+    _jma_live_frame_is_complete,
     asia_expanding_folds,
     build_asia_station_wide_dataset,
 )
+from src.asia_11am import JMA_REQUIRED_LIVE_FIELDS, _jma_output_column
+
+
+def test_jma_live_validation_allows_undefined_open_meteo_gusts() -> None:
+    rows = []
+    for hour in range(11, 24):
+        row = {
+            "forecast_hour_local": hour,
+            "lineage": "jma_msm_previous_day1",
+            "availability_basis": "open_meteo_previous_day1_variable",
+            "fetch_status": "ok",
+            "wind_gusts_10m_kmh": None,
+        }
+        for field in JMA_REQUIRED_LIVE_FIELDS:
+            row[_jma_output_column(field)] = 1.0
+        rows.append(row)
+    frame = pd.DataFrame(rows)
+    required_columns = tuple(_jma_output_column(field) for field in JMA_REQUIRED_LIVE_FIELDS)
+
+    assert _jma_live_frame_is_complete(frame, required_columns)
+    frame.loc[0, "temp_2m_c"] = None
+    assert not _jma_live_frame_is_complete(frame, required_columns)
+
+
+def test_live_alignment_accepts_iem_observation_and_rejects_awc() -> None:
+    observation = pd.DataFrame(
+        [
+            {
+                "station_id": "RJTT",
+                "observed_source": IEM_ASOS_METAR_PROVIDER,
+                "observed_data_source": "iem_asos_global_metar_live",
+                "observed_fetch_status": "ok",
+                "observed_as_of_time_local": "2026-08-06T11:00:00+09:00",
+                "observed_temp_at_as_of_f": 88.0,
+                "observed_high_temp_through_as_of_f": 89.0,
+                "observed_humidity_at_as_of": 60.0,
+                "observed_precip_recent_at_as_of": 0.0,
+                "observed_visibility_at_as_of": 10.0,
+                "observed_weather_code_at_as_of": "NONE",
+                "source_uri": "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py",
+                "source_checksum": "a" * 64,
+            }
+        ]
+    )
+    observed, observed_at = _validate_live_iem_observation(
+        observation,
+        station_id="RJTT",
+        cutoff_utc=datetime(2026, 8, 6, 2, tzinfo=UTC),
+    )
+    assert observed["observed_source"] == IEM_ASOS_METAR_PROVIDER
+    assert observed_at.isoformat() == "2026-08-06T02:00:00+00:00"
+
+    observation.loc[0, "observed_source"] = "aviation_weather_center_metar"
+    try:
+        _validate_live_iem_observation(
+            observation,
+            station_id="RJTT",
+            cutoff_utc=datetime(2026, 8, 6, 2, tzinfo=UTC),
+        )
+    except ValueError as exc:
+        assert str(exc) == "metar_source_mismatch"
+    else:
+        raise AssertionError("Expected legacy AWC observation source to be rejected")
 from src.calibration.station_stacking import (
     POINT_IN_TIME_UNSAFE_FEATURE_COLUMNS,
     StationStackingConfig,

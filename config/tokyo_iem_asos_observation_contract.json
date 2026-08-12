@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "contractId": "rjtt_iem_asos_metar_training_population_v1",
+  "trainingProvider": "iem_asos_global_metar",
+  "runtimeProvider": "iem_asos_global_metar",
+  "population": "RJTT METAR observations at or before 11:00 Asia/Tokyo",
+  "status": "passed",
+  "basis": "same_provider_same_station_same_metar_population",
+  "requiredRuntimeFields": [
+    "observed_humidity_at_as_of",
+    "observed_precip_recent_at_as_of",
+    "observed_visibility_at_as_of",
+    "observed_weather_code_at_as_of"
+  ],
+  "weatherCodePolicy": {
+    "sourceField": "IEM wxcodes",
+    "clearWeatherSentinel": "NONE",
+    "sentinelCondition": "IEM returned an explicit blank wxcodes field and the returned RJTT raw METAR has a valid timestamp with no present-weather token",
+    "unavailableCondition": "missing wxcodes field, missing or unparsable raw METAR, or a raw METAR present-weather token that conflicts with blank wxcodes",
+    "measurementRule": "weather-code normalization never supplies precipitation or any other measurement"
+  },
+  "historyReadiness": {
+    "rollingCalendarMonthCoverage": "every requested contract date must have one RJTT row; each calendar month is independently ready",
+    "providerCoverage": {
+      "providers": ["gfs", "gefs", "jma_msm"],
+      "maximumMissingFraction": 0.0
+    },
+    "finalizedTruth": {
+      "required": true,
+      "lineageRequired": true
+    },
+    "missingnessLimits": {
+      "requiredFeatureMaximumMissingFraction": 0.0,
+      "optionalFeatureMaximumMissingFractionPerCalendarMonth": 0.5
+    }
+  }
+}

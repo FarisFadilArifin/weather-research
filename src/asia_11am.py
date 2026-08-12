@@ -5,7 +5,9 @@ import io
 import json
 import math
 import os
+import random
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, time as datetime_time, timedelta
@@ -33,22 +35,6 @@ from .direct_nwp_fetch import (
     direct_nwp_file_url,
     extract_direct_nwp_run_feature_points,
 )
-from .hong_kong_11am import (
-    IEM_ASOS_URL,
-    IEM_FIELDS,
-    _atomic_write_frame,
-    _atomic_write_json,
-    _content_addressed_raw_path,
-    _request,
-    _sha256_bytes,
-    _sha256_file,
-)
-from .settlement_actuals import (
-    WeatherCompanyStationHistoryClient,
-    backfill_wunderground_station_history,
-)
-
-
 DEFAULT_DATA_ROOT = Path("data/calibration/asia_11am")
 START_DATE = date(2022, 7, 3)
 AS_OF_HOUR_LOCAL = 11
@@ -62,8 +48,18 @@ GFS_ARCHIVE = "https://noaa-gfs-bdp-pds.s3.amazonaws.com"
 GEFS_ARCHIVE = "https://noaa-gefs-pds.s3.amazonaws.com"
 _GEFS_CFGRIB_LOCK = Lock()
 JMA_HISTORY_URL = "https://previous-runs-api.open-meteo.com/v1/forecast"
-JMA_LIVE_URL = "https://api.open-meteo.com/v1/jma"
-AWC_METAR_URL = "https://aviationweather.gov/api/data/metar"
+IEM_ASOS_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
+IEM_FIELDS = (
+    "tmpf", "dwpf", "drct", "sknt", "p01i", "alti", "mslp", "vsby",
+    "gust", "skyc1", "skyc2", "skyc3", "skyc4", "skyl1", "skyl2",
+    "skyl3", "skyl4", "wxcodes", "peak_wind_gust", "peak_wind_drct",
+    "peak_wind_time", "metar",
+)
+IEM_CLEAR_WEATHER_SENTINEL = "NONE"
+_METAR_PRESENT_WEATHER_TOKEN = re.compile(
+    r"^(?:[+-]|VC)?(?:MI|BC|PR|DR|BL|SH|TS|FZ)?"
+    r"(?:DZ|RA|SN|SG|IC|PL|GR|GS|UP|BR|FG|FU|VA|DU|SA|HZ|PO|SQ|FC|SS|DS)+$"
+)
 
 # Keep the same deterministic field contract as the established 11AM
 # pipeline. Additional direct-NWP variables remain available through
@@ -88,6 +84,110 @@ JMA_BASE_FIELDS = (
     "wind_direction_10m",
     "wind_gusts_10m",
 )
+
+# Open-Meteo exposes the JMA MSM previous-day values used by the live Tokyo
+# contract, but currently reports the gust variable as ``undefined``.  Keep
+# requesting and normalizing it so the feature schema remains stable, while
+# requiring only the variables that this endpoint actually supplies.
+JMA_REQUIRED_LIVE_FIELDS = tuple(
+    field for field in JMA_BASE_FIELDS if field != "wind_gusts_10m"
+)
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (date, datetime, pd.Timestamp)):
+        return value.isoformat()
+    if value is pd.NA or (isinstance(value, float) and math.isnan(value)):
+        return None
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f"Not JSON serializable: {type(value)!r}")
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(text, encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _atomic_write_json(path: Path, payload: Mapping[str, Any] | Sequence[Any]) -> None:
+    _atomic_write_text(
+        path, json.dumps(payload, indent=2, sort_keys=True, default=_json_default)
+    )
+
+
+def _atomic_write_frame(path: Path, frame: pd.DataFrame) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    if path.suffix.lower() == ".parquet":
+        frame.to_parquet(temporary, index=False)
+    else:
+        frame.to_csv(temporary, index=False)
+    os.replace(temporary, path)
+
+
+def _sha256_bytes(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _request(
+    url: str,
+    *,
+    params: Mapping[str, Any] | Sequence[tuple[str, Any]] | None = None,
+    timeout: int = 90,
+    attempts: int = 6,
+) -> requests.Response:
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                timeout=timeout,
+                headers={"User-Agent": "weather-research-asia-11am/0.1"},
+            )
+            if response.status_code == 429 or response.status_code >= 500:
+                retry_after = response.headers.get("Retry-After")
+                delay = (
+                    float(retry_after)
+                    if retry_after and retry_after.isdigit()
+                    else min(60.0, 2**attempt)
+                )
+                time.sleep(delay + random.random())
+                continue
+            response.raise_for_status()
+            return response
+        except requests.HTTPError as exc:
+            if exc.response is not None and 400 <= exc.response.status_code < 500:
+                raise
+            last_error = exc
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            last_error = exc
+        if attempt < attempts:
+            time.sleep(min(60.0, 2**attempt) + random.random())
+    raise RuntimeError(f"GET failed after {attempts} attempts: {url}: {last_error}") from last_error
+
+
+def _content_addressed_raw_path(
+    directory: Path, stem: str, content: bytes, suffix: str
+) -> Path:
+    checksum = _sha256_bytes(content)
+    path = directory / f"{stem}_{checksum[:12]}{suffix}"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temporary.write_bytes(content)
+        os.replace(temporary, path)
+    return path
 
 
 @dataclass(frozen=True)
@@ -224,6 +324,8 @@ def run_settlement_backfill(
     api_key: str | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
+    from .wunderground_history import backfill_wunderground_station_history
+
     output = data_root / "normalized" / "settlements" / "settlement_actual_highs.csv"
     frame = backfill_wunderground_station_history(
         output,
@@ -316,8 +418,38 @@ def _iem_params(
     return params
 
 
+def _iem_weather_code(
+    value: Any,
+    *,
+    raw_metar: Any,
+    has_wxcodes_field: bool,
+    profile: AsiaCityProfile,
+) -> str | Any:
+    """Keep IEM's present-weather field source-truthful.
+
+    IEM publishes an empty ``wxcodes`` cell for a reported METAR with no
+    present-weather group.  That is distinct from a missing field or a raw
+    report whose weather group disagrees with the blank cell.  Only the former
+    becomes the explicit categorical ``NONE`` sentinel; it never supplies a
+    precipitation amount or another measurement.
+    """
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    raw = raw_metar.strip() if isinstance(raw_metar, str) else ""
+    tokens = raw.split()
+    valid_station_report = (
+        profile.station_id in tokens
+        and any(re.fullmatch(r"\d{6}Z", token) for token in tokens)
+    )
+    raw_has_weather = any(_METAR_PRESENT_WEATHER_TOKEN.fullmatch(token) for token in tokens)
+    if has_wxcodes_field and valid_station_report and not raw_has_weather:
+        return IEM_CLEAR_WEATHER_SENTINEL
+    return pd.NA
+
+
 def _iem_rows(content: bytes, profile: AsiaCityProfile) -> list[dict[str, Any]]:
     frame = pd.read_csv(io.BytesIO(content), na_values=["null", "M", ""], low_memory=False)
+    has_wxcodes_field = "wxcodes" in frame.columns
     rows: list[dict[str, Any]] = []
     for item in frame.to_dict(orient="records"):
         valid = pd.to_datetime(item.get("valid"), errors="coerce")
@@ -325,6 +457,7 @@ def _iem_rows(content: bytes, profile: AsiaCityProfile) -> list[dict[str, Any]]:
             continue
         if valid.tzinfo is None:
             valid = valid.tz_localize(profile.timezone)
+        raw_metar = item.get("metar")
         rows.append(
             {
                 "observed_at": valid.tz_convert(UTC).isoformat(),
@@ -339,8 +472,15 @@ def _iem_rows(content: bytes, profile: AsiaCityProfile) -> list[dict[str, Any]]:
                 "altimeter_inhg": item.get("alti"),
                 "sea_level_pressure_mb": item.get("mslp"),
                 "visibility_miles": item.get("vsby"),
-                "weather_codes": item.get("wxcodes"),
-                "precip_1hr_inches": pd.NA,
+                "weather_codes": _iem_weather_code(
+                    item.get("wxcodes"),
+                    raw_metar=raw_metar,
+                    has_wxcodes_field=has_wxcodes_field,
+                    profile=profile,
+                ),
+                # IEM's p01i is the observed one-hour liquid precipitation.
+                # Preserve it exactly; weather codes are not a substitute amount.
+                "precip_1hr_inches": item.get("p01i"),
                 "sky_cover_1": item.get("skyc1"),
                 "sky_cover_2": item.get("skyc2"),
                 "sky_cover_3": item.get("skyc3"),
@@ -349,7 +489,7 @@ def _iem_rows(content: bytes, profile: AsiaCityProfile) -> list[dict[str, Any]]:
                 "sky_base_2_ft": item.get("skyl2"),
                 "sky_base_3_ft": item.get("skyl3"),
                 "sky_base_4_ft": item.get("skyl4"),
-                "raw_metar": item.get("metar"),
+                "raw_metar": raw_metar,
                 "source": "iem_asos_global_metar",
                 "observation_type": "METAR",
                 "qc_field": "iem_as_is_archive",
@@ -381,8 +521,10 @@ def normalize_metar_rows(
     for row in summarized:
         row["city_id"] = profile.city_id
         row["timing_mode"] = TIMING_MODE
-        row["observed_precip_recent_at_as_of"] = pd.NA
-        row["observed_precip_amount_available"] = False
+        precip = pd.to_numeric(
+            pd.Series([row.get("observed_precip_recent_at_as_of")]), errors="coerce"
+        ).iloc[0]
+        row["observed_precip_amount_available"] = bool(pd.notna(precip))
         row["observed_data_source"] = data_source
         row["observed_temp_at_as_of_c"] = _f_to_c(row.get("observed_temp_at_as_of_f"))
         row["observed_high_temp_through_as_of_c"] = _f_to_c(
@@ -1395,14 +1537,17 @@ def collect_jma_live(
             f"{profile.city_name} live collection starts at "
             f"{profile.as_of_hour_local:02d}:{profile.live_delay_minutes:02d} local"
         )
+    # The promoted Tokyo model was trained on Open-Meteo's fixed lead-time
+    # previous_day1 variables.  The ordinary JMA endpoint is a newer forecast
+    # vintage and must never be substituted into this live row.
     response = _request(
-        JMA_LIVE_URL,
-        params=_jma_params(profile, contract_date, contract_date, historical=False),
+        JMA_HISTORY_URL,
+        params=_jma_params(profile, contract_date, contract_date, historical=True),
         timeout=120,
     )
     content = response.content
     raw_path = _content_addressed_raw_path(
-        data_root / "raw" / "jma_msm_latest_at_collection" / profile.city_id,
+        data_root / "raw" / "jma_msm_previous_day1" / profile.city_id,
         f"{contract_date}_{current:%Y%m%dT%H%M%SZ}",
         content,
         ".json",
@@ -1411,7 +1556,7 @@ def collect_jma_live(
         response.json(),
         profile,
         [contract_date],
-        historical=False,
+        historical=True,
         fetched_at_utc=current,
         source_url=response.url,
         source_checksum=_sha256_bytes(content),
@@ -1420,7 +1565,7 @@ def collect_jma_live(
         data_root
         / "normalized"
         / "live"
-        / "jma_msm_latest_at_collection"
+        / "jma_msm_previous_day1"
         / profile.city_id
         / f"{contract_date}_{current:%Y%m%dT%H%M%SZ}.parquet"
     )
@@ -1428,48 +1573,12 @@ def collect_jma_live(
     return {
         "city_id": profile.city_id,
         "contract_date": contract_date.isoformat(),
-        "lineage": "jma_msm_latest_at_collection",
+        "lineage": "jma_msm_previous_day1",
         "status": "complete" if len(frame) == 13 else "incomplete",
         "row_count": len(frame),
         "raw_path": str(raw_path),
         "normalized_path": str(path),
     }
-
-
-def _awc_rows(payload: Any) -> list[dict[str, Any]]:
-    records = payload if isinstance(payload, list) else []
-    rows: list[dict[str, Any]] = []
-    for item in records:
-        if not isinstance(item, Mapping):
-            continue
-        temp_c = _number(item.get("temp"))
-        dewpoint_c = _number(item.get("dewp"))
-        altimeter_hpa = _number(item.get("altim"))
-        clouds = item.get("clouds") if isinstance(item.get("clouds"), list) else []
-        row: dict[str, Any] = {
-            "observed_at": item.get("reportTime")
-            or datetime.fromtimestamp(float(item["obsTime"]), tz=UTC).isoformat(),
-            "temp_f": _c_to_f(temp_c),
-            "dewpoint_f": _c_to_f(dewpoint_c),
-            "wind_dir_degrees": item.get("wdir"),
-            "wind_speed_kt": item.get("wspd"),
-            "wind_gust_kt": item.get("wgst"),
-            "altimeter_inhg": (
-                float(altimeter_hpa) / 33.8638866667
-                if pd.notna(altimeter_hpa)
-                else pd.NA
-            ),
-            "visibility_miles": _number(item.get("visib")),
-            "raw_metar": item.get("rawOb"),
-            "source": "aviation_weather_center_metar",
-            "observation_type": item.get("metarType", "METAR"),
-            "qc_field": item.get("qcField"),
-        }
-        for index, cloud in enumerate(clouds[:4], start=1):
-            row[f"sky_cover_{index}"] = cloud.get("cover")
-            row[f"sky_base_{index}_ft"] = cloud.get("base")
-        rows.append(row)
-    return rows
 
 
 def collect_live_observation(
@@ -1480,43 +1589,46 @@ def collect_live_observation(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     current = now or datetime.now(UTC)
-    try:
-        response = _request(
-            AWC_METAR_URL,
-            params={"ids": profile.station_id, "format": "json", "hours": 36},
-            timeout=60,
+    # Tokyo training uses IEM ASOS/METAR. Live collection intentionally uses
+    # that same station/population contract; do not relabel another feed as equivalent.
+    response = _request(
+        IEM_ASOS_URL,
+        params=_iem_params(profile, contract_date, contract_date),
+        timeout=180,
+    )
+    content = response.content
+    frame = normalize_metar_rows(
+        _iem_rows(content, profile),
+        profile,
+        [contract_date],
+        source_filter="iem_asos_global_metar",
+        data_source="iem_asos_global_metar_live",
+    )
+    source_name = "iem_asos_global_metar"
+    required = (
+        "observed_humidity_at_as_of",
+        "observed_visibility_at_as_of",
+        "observed_precip_recent_at_as_of",
+    )
+    weather_code = frame.get("observed_weather_code_at_as_of", pd.Series(dtype=str))
+    complete = (
+        not frame.empty
+        and frame.get("observed_fetch_status", pd.Series(dtype=str)).astype(str).eq("ok").all()
+        and all(
+            name in frame
+            and pd.to_numeric(frame[name], errors="coerce").notna().all()
+            for name in required
         )
-        content = response.content
-        frame = normalize_metar_rows(
-            _awc_rows(response.json()),
-            profile,
-            [contract_date],
-            source_filter="aviation_weather_center_metar",
-            data_source="aviation_weather_center_metar_live",
-        )
-        if frame.empty or not frame["observed_fetch_status"].astype(str).eq("ok").any():
-            raise RuntimeError("AWC did not return a usable pre-11AM METAR")
-        source_name = "aviation_weather_center_metar"
-    except Exception:
-        response = _request(
-            IEM_ASOS_URL,
-            params=_iem_params(profile, contract_date, contract_date),
-            timeout=180,
-        )
-        content = response.content
-        frame = normalize_metar_rows(
-            _iem_rows(content, profile),
-            profile,
-            [contract_date],
-            source_filter="iem_asos_global_metar",
-            data_source="iem_asos_global_metar_live_fallback",
-        )
-        source_name = "iem_asos_global_metar"
+        and weather_code.astype(str).str.strip().ne("").all()
+    )
+    if not complete:
+        frame["observed_fetch_status"] = "unavailable"
+        frame["observed_unavailable_reason"] = "iem_required_runtime_observation_fields_missing"
     raw_path = _content_addressed_raw_path(
         data_root / "raw" / "live_observations" / profile.city_id,
         f"{contract_date}_{source_name}",
         content,
-        ".json" if source_name.startswith("aviation") else ".csv",
+        ".json",
     )
     frame["source_uri"] = response.url
     frame["source_checksum"] = _sha256_bytes(content)
@@ -1535,7 +1647,7 @@ def collect_live_observation(
         "source": source_name,
         "status": (
             "complete"
-            if not frame.empty and frame["observed_fetch_status"].astype(str).eq("ok").all()
+            if complete
             else "incomplete"
         ),
         "raw_path": str(raw_path),
@@ -1682,7 +1794,7 @@ def run_live(
         "observations": observations,
         "gfs": gfs,
         "gefs": gefs,
-        "jma_msm_latest_at_collection": jma,
+        "jma_msm_previous_day1": jma,
     }
 
 
