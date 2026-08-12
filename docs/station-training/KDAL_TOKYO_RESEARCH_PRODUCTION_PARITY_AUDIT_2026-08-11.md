@@ -2,6 +2,12 @@
 
 Audit date: 2026-08-11
 
+> **Historical status:** The release-status section below captures the state at
+> audit time, before the subsequent Polymarket weather bot patch and live point
+> model promotion. For the current live point-model identities, frozen feature
+> contracts, clean source commits, and production bundle hashes, see
+> [Live Model Notebook Lineage](LIVE_MODEL_NOTEBOOK_LINEAGE.md).
+
 ## Result
 
 Tokyo is already feature- and artifact-identical between research and

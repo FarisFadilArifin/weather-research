@@ -11,6 +11,7 @@ Project documentation is organized by purpose:
 | Modeling and calibration | [Modeling documentation](modeling/) |
 | Notebook catalog | [Notebook index](notebooks/README.md) |
 | Station training standard and SOP | [Station training](station-training/README.md) |
+| Live point-model notebook lineage | [KDAL and RJTT lineage](station-training/LIVE_MODEL_NOTEBOOK_LINEAGE.md) |
 | Operations | [Operations documentation](operations/) |
 | Historical handoffs | [Handoffs](handoffs/) |
 

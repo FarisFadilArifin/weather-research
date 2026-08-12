@@ -7,7 +7,9 @@ New collaborators should start with
 per-station training workflow and SOP are under
 [Station Training](docs/station-training/README.md). Local data expectations
 are documented in [DATA.md](docs/data/DATA.md), and notebook history/status is
-documented in [the notebook catalog](docs/notebooks/README.md).
+documented in [the notebook catalog](docs/notebooks/README.md). The exact
+notebook and clean-commit provenance of the point models used live is recorded
+in [Live Model Notebook Lineage](docs/station-training/LIVE_MODEL_NOTEBOOK_LINEAGE.md).
 
 The observed target variable is the final station daily high:
 
