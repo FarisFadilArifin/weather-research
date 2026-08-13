@@ -2,6 +2,8 @@
 
 Use this procedure to create, retrain, or change a station notebook. The
 structural and artifact requirements are defined in `NOTEBOOK_STANDARD.md`.
+For exploratory work under `notebooks/experiments/`, follow
+`RESEARCH_NOTEBOOK_GUIDE.md`; do not create a competing active baseline.
 
 ## 1. Define the station contract
 
