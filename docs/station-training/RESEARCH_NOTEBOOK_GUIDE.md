@@ -1,9 +1,11 @@
 # Research Notebook Guide for the Current Station Pipeline
 
-This guide is the required procedure for creating a research notebook that
-uses the current station-training pipeline. It applies to agents and humans
-working under `notebooks/experiments/`. For changes to an active station
-baseline, follow [SOP.md](SOP.md) instead.
+This guide is required context before any work anywhere under `notebooks/`,
+including active baselines, experiments, generators, configs, and notebook
+tests. It provides the detailed procedure for research notebooks that use the
+current station-training pipeline. For changes to an active station baseline,
+read this guide for shared environment, provenance, Optuna, chronology, and
+safety rules, then execute the baseline procedure in [SOP.md](SOP.md).
 
 The central rule is simple: a research notebook may compare or extend the
 current pipeline, but it must not silently become a second source of truth for

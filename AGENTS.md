@@ -36,8 +36,8 @@ Follow:
 
 - `docs/station-training/NOTEBOOK_STANDARD.md`
 - `docs/station-training/SOP.md`
-- `docs/station-training/RESEARCH_NOTEBOOK_GUIDE.md` for any work under
-  `notebooks/experiments/`
+- `docs/station-training/RESEARCH_NOTEBOOK_GUIDE.md` before any work anywhere
+  under `notebooks/`, including both active baselines and experiments
 - `docs/station-training/ORDINAL_MODEL_2.md`
 
 Keep point and probability chronology strictly forward. Fit preprocessing,

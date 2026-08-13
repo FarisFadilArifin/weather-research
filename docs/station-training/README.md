@@ -15,7 +15,7 @@ per station. Do not add multiple stations to one notebook.
 | Tokyo station configuration | `configs/Tokyo.json` |
 | Notebook structure and artifact contract | `NOTEBOOK_STANDARD.md` |
 | New-station and retraining procedure | `SOP.md` |
-| Current-pipeline research notebook procedure | `RESEARCH_NOTEBOOK_GUIDE.md` |
+| Required context for all notebook work and current-pipeline research procedure | `RESEARCH_NOTEBOOK_GUIDE.md` |
 | Full pipeline, Celsius/Fahrenheit, bucket, and 3% missingness guide | `TEMPERATURE_UNITS_AND_BUCKETS.md` |
 | Ordinal Model 2 contract | `ORDINAL_MODEL_2.md` |
 | Immutable release provenance gate | `RELEASE_PROVENANCE.md` |
