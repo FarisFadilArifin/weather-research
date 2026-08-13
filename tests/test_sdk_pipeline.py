@@ -262,6 +262,149 @@ def test_same_day_11am_cycle_selection_uses_11am_local_snapshot(monkeypatch) -> 
     assert max(nbm_fxx) == 13
 
 
+def test_same_day_11am_live_safe_cycle_selection_matches_1115_decision_table(monkeypatch) -> None:
+    def fake_cycle_hours(model: str) -> tuple[int, ...]:
+        return (0, 6, 12, 18) if model == "gfs" else tuple(range(24))
+
+    monkeypatch.setattr(sdk_pipeline, "model_cycle_hours", fake_cycle_hours)
+
+    cases = [
+        ("KATL", "America/New_York", "hrrr", datetime(2026, 6, 11, 14, tzinfo=UTC), 1),
+        ("KATL", "America/New_York", "gfs", datetime(2026, 6, 11, 6, tzinfo=UTC), 9),
+        ("KAUS", "America/Chicago", "hrrr", datetime(2026, 6, 11, 15, tzinfo=UTC), 1),
+        ("KAUS", "America/Chicago", "gfs", datetime(2026, 6, 11, 6, tzinfo=UTC), 10),
+        ("KLAX", "America/Los_Angeles", "hrrr", datetime(2026, 6, 11, 17, tzinfo=UTC), 1),
+        ("KLAX", "America/Los_Angeles", "gfs", datetime(2026, 6, 11, 12, tzinfo=UTC), 6),
+    ]
+    for _station_id, timezone, model, expected_cycle, expected_min_fxx in cases:
+        as_of = sdk_pipeline.forecast_as_of_for_timing(
+            "2026-06-11",
+            timezone,
+            "same_day_11am_live_safe",
+        )
+        cycle, fxx = sdk_pipeline.choose_cycle(
+            model,
+            "2026-06-11",
+            timezone,
+            as_of,
+            timing_mode="same_day_11am_live_safe",
+        )
+        assert cycle == expected_cycle
+        assert min(fxx) == expected_min_fxx
+        assert cycle + timedelta(hours=min(fxx)) == as_of
+
+
+def test_same_day_9am_live_safe_cycle_selection_matches_0915_decision_table(monkeypatch) -> None:
+    def fake_cycle_hours(model: str) -> tuple[int, ...]:
+        return (0, 6, 12, 18) if model == "gfs" else tuple(range(24))
+
+    monkeypatch.setattr(sdk_pipeline, "model_cycle_hours", fake_cycle_hours)
+
+    cases = [
+        ("KATL", "America/New_York", "hrrr", datetime(2026, 6, 15, 13, tzinfo=UTC), datetime(2026, 6, 15, 12, tzinfo=UTC), 1),
+        ("KATL", "America/New_York", "gfs", datetime(2026, 6, 15, 13, tzinfo=UTC), datetime(2026, 6, 15, 6, tzinfo=UTC), 7),
+        ("KATL", "America/New_York", "nbm", datetime(2026, 6, 15, 13, tzinfo=UTC), datetime(2026, 6, 15, 11, tzinfo=UTC), 2),
+        ("KDAL", "America/Chicago", "hrrr", datetime(2026, 6, 15, 14, tzinfo=UTC), datetime(2026, 6, 15, 13, tzinfo=UTC), 1),
+        ("KDAL", "America/Chicago", "gfs", datetime(2026, 6, 15, 14, tzinfo=UTC), datetime(2026, 6, 15, 6, tzinfo=UTC), 8),
+        ("KDAL", "America/Chicago", "nbm", datetime(2026, 6, 15, 14, tzinfo=UTC), datetime(2026, 6, 15, 12, tzinfo=UTC), 2),
+        ("KMIA", "America/New_York", "hrrr", datetime(2026, 6, 15, 13, tzinfo=UTC), datetime(2026, 6, 15, 12, tzinfo=UTC), 1),
+        ("KMIA", "America/New_York", "gfs", datetime(2026, 6, 15, 13, tzinfo=UTC), datetime(2026, 6, 15, 6, tzinfo=UTC), 7),
+        ("KMIA", "America/New_York", "nbm", datetime(2026, 6, 15, 13, tzinfo=UTC), datetime(2026, 6, 15, 11, tzinfo=UTC), 2),
+        ("KSEA", "America/Los_Angeles", "hrrr", datetime(2026, 6, 15, 16, tzinfo=UTC), datetime(2026, 6, 15, 15, tzinfo=UTC), 1),
+        ("KSEA", "America/Los_Angeles", "gfs", datetime(2026, 6, 15, 16, tzinfo=UTC), datetime(2026, 6, 15, 6, tzinfo=UTC), 10),
+        ("KSEA", "America/Los_Angeles", "nbm", datetime(2026, 6, 15, 16, tzinfo=UTC), datetime(2026, 6, 15, 14, tzinfo=UTC), 2),
+    ]
+    for _station_id, timezone, model, expected_as_of, expected_cycle, expected_min_fxx in cases:
+        as_of = sdk_pipeline.forecast_as_of_for_timing(
+            "2026-06-15",
+            timezone,
+            "same_day_9am_live_safe",
+        )
+        start, end = sdk_pipeline.forecast_window_for_timing(
+            "2026-06-15",
+            timezone,
+            "same_day_9am_live_safe",
+            as_of,
+        )
+        cycle, fxx = sdk_pipeline.choose_cycle(
+            model,
+            "2026-06-15",
+            timezone,
+            as_of,
+            timing_mode="same_day_9am_live_safe",
+        )
+        assert as_of == expected_as_of
+        assert start == expected_as_of
+        assert cycle == expected_cycle
+        assert min(fxx) == expected_min_fxx
+        assert len(fxx) == 15
+        assert cycle + timedelta(hours=min(fxx)) == as_of
+        assert all(cycle + timedelta(hours=hour) >= start for hour in fxx)
+        assert all(cycle + timedelta(hours=hour) < end for hour in fxx)
+
+
+def test_same_day_9am_live_safe_forecast_as_of_handles_winter_offsets() -> None:
+    cases = [
+        ("America/New_York", datetime(2026, 1, 15, 14, tzinfo=UTC)),
+        ("America/Chicago", datetime(2026, 1, 15, 15, tzinfo=UTC)),
+        ("America/Los_Angeles", datetime(2026, 1, 15, 17, tzinfo=UTC)),
+    ]
+    for timezone, expected_as_of in cases:
+        as_of = sdk_pipeline.forecast_as_of_for_timing(
+            "2026-01-15",
+            timezone,
+            "same_day_9am_live_safe",
+        )
+        start, end = sdk_pipeline.forecast_window_for_timing(
+            "2026-01-15",
+            timezone,
+            "same_day_9am_live_safe",
+            as_of,
+        )
+        assert as_of == expected_as_of
+        assert start == expected_as_of
+        assert len(sdk_pipeline.forecast_hours_for_utc_window(as_of, start, end)) == 15
+
+
+def test_same_day_1pm_live_safe_kdal_cycle_selection_handles_dst(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sdk_pipeline,
+        "model_cycle_hours",
+        lambda model: (0, 6, 12, 18) if model == "gfs" else tuple(range(24)),
+    )
+    cases = [
+        ("2026-01-15", datetime(2026, 1, 15, 19, tzinfo=UTC), {"hrrr": (18, 1), "gfs": (12, 7), "nbm": (17, 2)}),
+        ("2026-06-15", datetime(2026, 6, 15, 18, tzinfo=UTC), {"hrrr": (17, 1), "gfs": (12, 6), "nbm": (16, 2)}),
+        ("2026-03-08", datetime(2026, 3, 8, 18, tzinfo=UTC), {"hrrr": (17, 1), "gfs": (12, 6), "nbm": (16, 2)}),
+        ("2026-11-01", datetime(2026, 11, 1, 19, tzinfo=UTC), {"hrrr": (18, 1), "gfs": (12, 7), "nbm": (17, 2)}),
+    ]
+    for contract_date, expected_as_of, expected in cases:
+        for model, (cycle_hour, min_fxx) in expected.items():
+            cycle, fxx, as_of, start, end = sdk_pipeline.choose_same_day_1pm_live_safe_cycle(
+                model, contract_date, "America/Chicago"
+            )
+            assert as_of == expected_as_of
+            assert start == expected_as_of
+            assert cycle == expected_as_of.replace(hour=cycle_hour)
+            assert min(fxx) == min_fxx
+            assert len(fxx) == 11
+            assert cycle + timedelta(hours=min(fxx)) == as_of
+            assert cycle + timedelta(hours=max(fxx)) < end
+
+
+def test_direct_nbm_1pm_uses_latest_live_safe_cycle(monkeypatch) -> None:
+    monkeypatch.setattr(sdk_pipeline, "model_cycle_hours", lambda model: tuple(range(24)))
+    summer = sdk_pipeline.choose_direct_nbm_latest_live_safe_cycle(
+        "2026-06-15", "America/Chicago", sdk_pipeline.TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE
+    )
+    winter = sdk_pipeline.choose_direct_nbm_latest_live_safe_cycle(
+        "2026-01-15", "America/Chicago", sdk_pipeline.TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE
+    )
+    assert summer[0] == datetime(2026, 6, 15, 16, tzinfo=UTC)
+    assert winter[0] == datetime(2026, 1, 15, 17, tzinfo=UTC)
+    assert min(summer[1]) == min(winter[1]) == 2
+
+
 def test_same_day_11am_window_excludes_pre_11am_hours(monkeypatch) -> None:
     monkeypatch.setattr(sdk_pipeline, "model_cycle_hours", lambda model: tuple(range(24)))
     as_of = sdk_pipeline.forecast_as_of_for_timing("2026-07-15", "America/New_York", "same_day_11am")
@@ -393,6 +536,13 @@ def test_nwp_summary_populates_maximal_common_features() -> None:
     row = sdk_pipeline._summarize_nwp_request(request, hourly)
     assert round(row["forecast_temp_at_as_of_f"], 2) == 80.33
     assert row["precip_amount"] == 3.0
+    assert row["forecast_precip_total_mm"] == 3.0
+    assert row["forecast_precip_max_1h_mm"] == 2.0
+    assert row["forecast_precip_hours_count"] == 2
+    assert row["forecast_has_precip"] == 1
+    assert row["forecast_precip_intensity_code"] == 2
+    assert row["forecast_precip_intensity"] == "light_rain"
+    assert row[sdk_pipeline.PRECIP_FEATURE_FLAG] is True
     assert round(row["wind_speed_at_as_of"], 2) == 11.18
     assert round(row["wind_gust_max"], 2) == 20.13
     assert row["humidity_at_as_of"] == 50.0
@@ -443,7 +593,7 @@ def test_batched_nwp_fetch_keeps_partial_hours_when_one_fxx_fails(monkeypatch) -
     assert rows[0]["forecast_hour_missing"] == "2"
 
 
-def test_nbm_uses_subprocess_fetch_by_default() -> None:
+def test_nbm_uses_direct_fetch_by_default() -> None:
     request = sdk_pipeline.NwpRequest(
         station_id="KATL",
         station_name="Atlanta",
@@ -460,10 +610,10 @@ def test_nbm_uses_subprocess_fetch_by_default() -> None:
         forecast_window_end=datetime(2025, 1, 2, 5, tzinfo=UTC),
     )
 
-    assert sdk_pipeline._use_nbm_subprocess_fetch(request)
+    assert not sdk_pipeline._use_nbm_subprocess_fetch(request)
 
 
-def test_hrrr_uses_subprocess_fetch_by_default() -> None:
+def test_hrrr_uses_direct_fetch_by_default_and_supports_subprocess_override(monkeypatch) -> None:
     request = sdk_pipeline.NwpRequest(
         station_id="KATL",
         station_name="Atlanta",
@@ -480,7 +630,13 @@ def test_hrrr_uses_subprocess_fetch_by_default() -> None:
         forecast_window_end=datetime(2025, 1, 2, 5, tzinfo=UTC),
     )
 
+    assert not sdk_pipeline._use_nwp_subprocess_fetch(request)
+
+    monkeypatch.setenv("WEATHER_RESEARCH_NWP_SUBPROCESS", "1")
     assert sdk_pipeline._use_nwp_subprocess_fetch(request)
+
+    monkeypatch.setenv("WEATHER_RESEARCH_HRRR_SUBPROCESS", "0")
+    assert not sdk_pipeline._use_nwp_subprocess_fetch(request)
 
 
 def test_nbm_variable_patch_uses_lean_stable_feature_set_by_default(monkeypatch) -> None:
@@ -633,6 +789,7 @@ def test_sdk_nwp_weather_feature_enrichment_revisits_old_ok_rows(tmp_path, monke
     assert calls
     row = frame.iloc[0]
     assert row[sdk_pipeline.WEATHER_FEATURE_FLAG] is True or str(row[sdk_pipeline.WEATHER_FEATURE_FLAG]).lower() == "true"
+    assert row[sdk_pipeline.PRECIP_FEATURE_FLAG] is True or str(row[sdk_pipeline.PRECIP_FEATURE_FLAG]).lower() == "true"
     assert round(row["dewpoint_mean_f"], 2) == 58.73
 
     sdk_pipeline.backfill_sdk_nwp(
@@ -645,6 +802,23 @@ def test_sdk_nwp_weather_feature_enrichment_revisits_old_ok_rows(tmp_path, monke
         include_weather_features=True,
     )
     assert len(calls) == len(set(calls))
+
+
+def test_sdk_nwp_temperature_only_cannot_request_weather_enrichment(tmp_path) -> None:
+    try:
+        sdk_pipeline.backfill_sdk_nwp(
+            sdk_cache_dir=tmp_path,
+            stations=["KATL"],
+            models=["hrrr"],
+            start_date="2026-01-01",
+            end_date="2026-01-01",
+            include_weather_features=True,
+            temperature_only=True,
+        )
+    except ValueError as exc:
+        assert "temperature_only" in str(exc)
+    else:
+        raise AssertionError("Expected temperature_only/include_weather_features conflict to raise")
 
 
 def test_direct_nbm_backfill_batches_stations_and_labels_source(tmp_path, monkeypatch) -> None:
@@ -673,6 +847,46 @@ def test_direct_nbm_backfill_batches_stations_and_labels_source(tmp_path, monkey
     assert set(frame["timing_mode"]) == {"same_day_11am"}
     assert set(frame["data_source"]) == {"direct_noaa_nbm_archive_grib2"}
     assert str(frame.iloc[0]["source_label"]).startswith("noaa_nbm_archive_tmp_")
+
+
+def test_direct_nbm_live_safe_uses_13z_text_cycle() -> None:
+    station_meta = sdk_pipeline.station_registry_frame(["KATL", "KAUS", "KLAX"])
+    requests = sdk_pipeline.plan_direct_nbm_requests(
+        station_meta,
+        ["2026-06-11"],
+        timing_mode=sdk_pipeline.TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE,
+    )
+    by_station = {request.station_id: request for request in requests}
+
+    assert set(by_station) == {"KATL", "KAUS", "KLAX"}
+    for request in by_station.values():
+        assert request.cycle == datetime(2026, 6, 11, 13, tzinfo=UTC)
+        assert request.timing_mode == sdk_pipeline.TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE
+        assert request.cycle_selection_policy == "direct_noaa_nbm_13z_cycle_available_by_1115_local_with_120min_buffer"
+
+    assert by_station["KATL"].fxx_hours == tuple(range(2, 15))
+    assert by_station["KAUS"].fxx_hours == tuple(range(3, 16))
+    assert by_station["KLAX"].fxx_hours == tuple(range(5, 18))
+
+
+def test_direct_nbm_live_safe_batches_one_13z_run_across_timezones(tmp_path, monkeypatch) -> None:
+    calls: list[tuple[list[str], tuple[int, ...]]] = []
+
+    def fake_extract(stations, settings, raw_dir, issue_utc, fxx_hours, force_refresh, variable):
+        calls.append((sorted(stations), tuple(fxx_hours)))
+        return {station: {fxx: 70.0 + fxx / 100 for fxx in fxx_hours} for station in stations}
+
+    monkeypatch.setattr("src.nws_fetch._extract_nbm_run_points", fake_extract)
+    frame = sdk_pipeline.backfill_direct_nbm(
+        cache_dir=tmp_path,
+        stations=["KATL", "KAUS", "KLAX"],
+        start_date="2026-06-11",
+        end_date="2026-06-11",
+        timing_mode=sdk_pipeline.TIMING_MODE_SAME_DAY_11AM_LIVE_SAFE,
+    )
+
+    assert len(frame) == 3
+    assert calls == [(["KATL", "KAUS", "KLAX"], tuple(range(2, 18)))]
 
 
 def test_direct_nbm_backfill_can_include_weather_features(tmp_path, monkeypatch) -> None:
@@ -706,6 +920,7 @@ def test_direct_nbm_backfill_can_include_weather_features(tmp_path, monkeypatch)
     )
     row = frame.iloc[0]
     assert row["fetch_status"] == "ok"
+    assert 70.0 < float(row["raw_forecast_high_f"]) < 90.0
     assert row["cloud_cover_mean"] == 70.0
     assert row["precip_amount"] > 0
     assert row["humidity_at_as_of"] == 55.0
@@ -951,6 +1166,57 @@ def test_sdk_dataset_builder_joins_safe_11am_observed_features(tmp_path) -> None
     assert row["calibration_bias_f"] == 2.0
     assert row["observed_temp_at_as_of_f"] == 70.0
     assert row["observed_as_of_age_minutes"] == 5
+
+
+def test_sdk_dataset_builder_quarantines_impossible_observed_high_labels(tmp_path) -> None:
+    sdk_dir = tmp_path / "data" / "calibration" / "sdk"
+    obs_dir = sdk_dir / "sdk_current_obs_2021_2026"
+    obs_dir.mkdir(parents=True)
+    sdk_pipeline.write_station_registry(sdk_dir, ["KATL"])
+    pd.DataFrame(
+        {
+            "station_id": ["KATL", "KATL"],
+            "contract_date": ["2026-01-01", "2026-01-02"],
+            "actual_high_f": [80.0, 72.0],
+            "fetch_status": ["ok", "ok"],
+            "obs_count": [24, 24],
+        }
+    ).to_csv(sdk_dir / sdk_pipeline.SDK_ACTUALS_FILE, index=False)
+    pd.DataFrame(
+        {
+            "station_id": ["KATL", "KATL"],
+            "provider": ["hrrr", "hrrr"],
+            "model": ["hrrr", "hrrr"],
+            "timing_mode": ["same_day_11am", "same_day_11am"],
+            "contract_date": ["2026-01-01", "2026-01-02"],
+            "forecast_as_of": ["2026-01-01T16:00:00+00:00", "2026-01-02T16:00:00+00:00"],
+            "issued_at": ["2026-01-01T15:00:00+00:00", "2026-01-02T15:00:00+00:00"],
+            "raw_forecast_high_f": [78.0, 73.0],
+            "fetch_status": ["ok", "ok"],
+        }
+    ).to_csv(sdk_dir / sdk_pipeline.SDK_NWP_FILE, index=False)
+    pd.DataFrame(
+        {
+            "station_id": ["KATL", "KATL"],
+            "contract_date": ["2026-01-01", "2026-01-02"],
+            "timing_mode": ["same_day_11am", "same_day_11am"],
+            "observed_fetch_status": ["ok", "ok"],
+            "observed_temp_at_as_of_f": [70.0, 71.0],
+            "observed_high_temp_through_as_of_f": [75.0, 74.0],
+            "observed_as_of_age_minutes": [5, 5],
+        }
+    ).to_csv(obs_dir / "sdk_current_observations_11am.csv", index=False)
+
+    samples = build_calibration_samples(
+        project_root=tmp_path,
+        calibration_dir=tmp_path / "data" / "calibration",
+        source_mode="sdk",
+        sdk_cache_dir=sdk_dir,
+        include_timing_modes=["same_day_11am"],
+    )
+
+    assert list(samples["contract_date"]) == ["2026-01-01"]
+    assert samples.iloc[0]["strict_quality_ok"]
 
 
 def test_merge_sdk_nwp_shards_keeps_latest_by_timing_mode(tmp_path) -> None:

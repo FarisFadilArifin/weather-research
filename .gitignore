@@ -4,6 +4,8 @@ __pycache__/
 *.py[cod]
 
 data/
+!docs/data/
+!docs/data/**
 logs/
 outputs/
 

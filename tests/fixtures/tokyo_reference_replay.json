@@ -1,0 +1,14 @@
+{
+  "method": {
+    "station": "RJTT/Tokyo",
+    "selector": "point_bucket_c",
+    "entry_policy": "no_filter",
+    "cost_cap": 0.47
+  },
+  "flat_4": {
+    "entries": 96,
+    "net_pnl_usd": 372.1667330085244,
+    "roi_on_gross_notional": 0.9691842005430322,
+    "max_drawdown_usd": 18.94453765586033
+  }
+}

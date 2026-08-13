@@ -2,7 +2,12 @@
 
 Python research pipeline for daily high-temperature forecast markets. The current deployment direction is a same-day 11 AM station-stacking v2 workflow that combines GFS, HRRR, current station observations, calendar features, lagged history, and notebook-v2 engineered features.
 
-New collaborators should start with [QUICKSTART.md](QUICKSTART.md). Local data expectations are documented in [DATA.md](DATA.md), and notebook status is documented in [notebooks/README.md](notebooks/README.md).
+New collaborators should start with
+[QUICKSTART.md](docs/getting-started/QUICKSTART.md). The active
+per-station training workflow and SOP are under
+[Station Training](docs/station-training/README.md). Local data expectations
+are documented in [DATA.md](docs/data/DATA.md), and notebook history/status is
+documented in [the notebook catalog](docs/notebooks/README.md).
 
 The observed target variable is the final station daily high:
 
@@ -82,6 +87,7 @@ The 10:50-11:10 observation window is a widened production rule. Rebuild the sta
 Derived 11 AM observation features include:
 
 - `observed_dewpoint_depression_f`
+- `observed_high_temp_through_as_of_f`
 - `observed_heat_index_at_as_of_f`
 - `observed_wind_chill_at_as_of_f`
 - `observed_wind_dir_sin`
@@ -91,6 +97,8 @@ Derived 11 AM observation features include:
 - `observed_is_thunder_at_as_of`
 
 Audit fields such as raw METAR, observation timestamps, source text, and unavailable reasons are kept for lineage but should not be treated as ordinary numeric model features.
+
+Strict data-quality fields such as `strict_quality_ok`, `strict_quality_issues`, `actual_data_quality_flag`, and `actual_raw_observation_count` are training and evaluation gates, not live market features. They define the strict benchmark population and should be reported alongside accuracy metrics, but the bot cannot know the final `actual_high_f` at inference time.
 
 Station-stacking v2 adds notebook-level features:
 
@@ -128,6 +136,8 @@ python -m src.backfill_mostlyright_sdk_nwp --sdk-cache-dir data/calibration/sdk_
 python -m src.backfill_mostlyright_sdk_nwp --sdk-cache-dir data/calibration/sdk_11am_hrrr_2025_2026 --stations $stations --models hrrr --timing-mode same_day_11am --start-date 2025-01-01 --end-date latest-complete --include-weather-features --fxx-workers 3
 ```
 
+The same command refreshes SDK precipitation summaries. Rows written before `precip_features_included=true` are revisited so v4 notebooks can use `forecast_precip_total_mm`, `forecast_precip_max_1h_mm`, `forecast_precip_hours_count`, `forecast_has_precip`, and `forecast_precip_intensity_code`.
+
 Backfill direct NOAA NBM:
 
 ```powershell
@@ -137,12 +147,16 @@ python -m src.backfill_direct_nbm --sdk-cache-dir data/calibration/direct_nbm_20
 Run station-level stacking v2 notebooks:
 
 ```text
-notebooks/station_stacking_v2/stacking_KATL_v2.ipynb
-notebooks/station_stacking_v2/stacking_KAUS_v2.ipynb
+notebooks/experiments/station_stacking_v2/stacking_KATL_v2.ipynb
+notebooks/experiments/station_stacking_v2/stacking_KAUS_v2.ipynb
 ...
 ```
 
 Those notebooks patch in v2 feature engineering, call `src.calibration.station_stacking.run_station_year_split_experiment`, write wide station/date feature files, compare raw-provider baselines, tune XGBoost/LightGBM/CatBoost on fixed year splits, and train the Ridge stack.
+
+For the precipitation-feature experiment, run the v4 notebooks under `notebooks/experiments/station_stacking_v4/`. They write artifacts to `data/calibration/station_stacking_v4`.
+
+For the MAE-tuned v5/v6 experiment path, use `notebooks/experiments/station_stacking_v5/` and `notebooks/experiments/station_stacking_v6/`. V6 writes artifacts to `data/calibration/station_stacking_v6`; the actual model input list is `{STATION}_feature_columns.csv`, not only the raw cache schema or the `V6_FEATURE_COLUMNS` constant. Current v6 artifacts contain 237 candidate training inputs, and all-NaN numeric inputs are removed before model fitting.
 
 Export station-stacking v2 model weights:
 
@@ -171,6 +185,8 @@ Station-stacking v2 outputs are written under `data/calibration/station_stacking
 - `{STATION}_year_split_scoreboard.csv`
 - `{STATION}_year_split_selected_hyperparameters.csv`
 - `{STATION}_feature_columns.csv`
+
+For v4, v5, and v6 experiment artifacts, replace the output folder suffix with `station_stacking_v4`, `station_stacking_v5`, or `station_stacking_v6`. The v6 `{STATION}_feature_columns.csv` file is the best source for auditing exactly which features were available to the trainer, and the corresponding `{STATION}_features.csv` file can be used to compute NaN percentages for every model input.
 
 Exported model weights are written under `data/calibration/station_stacking_v2/model_weights/`:
 

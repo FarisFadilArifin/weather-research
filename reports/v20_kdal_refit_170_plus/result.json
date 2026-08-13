@@ -1,0 +1,72 @@
+{
+  "experiment": "Frozen live model 170 versus export-style daily refits 170, 171, 172, ... using only prior eligible enriched days",
+  "base_cutoff": "2026-06-21",
+  "base_2026_training_days": 170,
+  "tail_last_date": "2026-07-29",
+  "eligible_tail_days": 18,
+  "training_day_versions_tested": [
+    170,
+    171,
+    172,
+    173,
+    174,
+    175,
+    176,
+    177,
+    178,
+    179,
+    180,
+    181,
+    182,
+    183,
+    184,
+    185,
+    186,
+    187
+  ],
+  "summary": [
+    {
+      "method": "fixed_170",
+      "days": 18,
+      "bucket_hits": 10,
+      "bucket_hit_rate_pct": 55.55555555555556,
+      "mae_f": 1.191311586150103,
+      "rmse_f": 1.5247875961665642,
+      "bias_actual_minus_prediction_f": 0.07370087599571601
+    },
+    {
+      "method": "daily_refit",
+      "days": 18,
+      "bucket_hits": 10,
+      "bucket_hit_rate_pct": 55.55555555555556,
+      "mae_f": 1.1067372279980603,
+      "rmse_f": 1.5394818526775118,
+      "bias_actual_minus_prediction_f": 0.16203069803346104
+    }
+  ],
+  "paired": {
+    "both_hit": 10,
+    "fixed_only_hit": 0,
+    "refit_only_hit": 0,
+    "neither_hit": 8,
+    "net_hits": 0,
+    "hit_rate_gain_pp": 0.0,
+    "bootstrap_95ci_low_pp": 0.0,
+    "bootstrap_95ci_high_pp": 0.0,
+    "mcnemar_exact_two_sided_pvalue": 1.0
+  },
+  "reproduction_check": {
+    "mean_absolute_rebuilt_170_minus_artifact_f": 0.17135752568256712,
+    "max_absolute_rebuilt_170_minus_artifact_f": 0.4655257713103822
+  },
+  "coverage_note": "Only rows passing the original v20 production modeling contract are eligible. The enriched file ends July 29, but missing provider inputs create calendar-date gaps in the 18-row forward tail.",
+  "runtime_versions": {
+    "numpy": "2.4.6",
+    "pandas": "3.0.3",
+    "scikit-learn": "1.8.0",
+    "xgboost": "3.2.0",
+    "lightgbm": "4.6.0",
+    "catboost": "1.2.10",
+    "joblib": "1.5.3"
+  }
+}

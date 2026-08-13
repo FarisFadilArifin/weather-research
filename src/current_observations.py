@@ -15,6 +15,8 @@ from .calibration.sdk_pipeline import (
     STATION_METADATA,
     TARGET_STATIONS,
     TIMING_MODE_SAME_DAY_11AM,
+    TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE,
+    TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE,
     date_range,
     local_datetime_utc,
     resolve_contract_end,
@@ -22,8 +24,15 @@ from .calibration.sdk_pipeline import (
 
 
 CURRENT_OBSERVATIONS_FILE = "sdk_current_observations_11am.csv"
+CURRENT_OBSERVATIONS_9AM_FILE = "sdk_current_observations_9am.csv"
+CURRENT_OBSERVATIONS_1PM_FILE = "sdk_current_observations_1pm.csv"
 
 CACHE_KEYS = ["station_id", "contract_date", "timing_mode"]
+SUPPORTED_CURRENT_OBSERVATION_TIMING_MODES = {
+    TIMING_MODE_SAME_DAY_11AM,
+    TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE,
+    TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE,
+}
 
 
 def backfill_sdk_current_observations(
@@ -43,11 +52,23 @@ def backfill_sdk_current_observations(
     sleep_between_chunks: float = 0.0,
     max_chunks: int | None = None,
 ) -> pd.DataFrame:
-    if timing_mode != TIMING_MODE_SAME_DAY_11AM:
-        raise ValueError("Current observation features currently support timing_mode='same_day_11am' only")
+    if timing_mode not in SUPPORTED_CURRENT_OBSERVATION_TIMING_MODES:
+        raise ValueError(
+            f"Current observation features support timing modes "
+            f"{sorted(SUPPORTED_CURRENT_OBSERVATION_TIMING_MODES)}"
+        )
+    expected_as_of_hour = {
+        TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE: 9,
+        TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE: 13,
+    }.get(timing_mode, 11)
+    if int(as_of_hour_local) != expected_as_of_hour:
+        raise ValueError(
+            f"{timing_mode!r} requires as_of_hour_local={expected_as_of_hour}; "
+            f"got {as_of_hour_local}"
+        )
     out_dir = Path(sdk_cache_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = out_dir / CURRENT_OBSERVATIONS_FILE
+    cache_path = out_dir / current_observation_cache_file(timing_mode, as_of_hour_local)
     existing = _load_existing(cache_path)
     completed = set() if force else _completed_keys(existing, retry_unavailable=retry_unavailable)
     station_ids = [str(s).upper() for s in (stations or TARGET_STATIONS)]
@@ -129,6 +150,14 @@ def backfill_sdk_current_observations(
             if sleep_between_chunks > 0:
                 time.sleep(sleep_between_chunks)
     return existing
+
+
+def current_observation_cache_file(timing_mode: str, as_of_hour_local: int) -> str:
+    if timing_mode == TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE or int(as_of_hour_local) == 13:
+        return CURRENT_OBSERVATIONS_1PM_FILE
+    if timing_mode == TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE or int(as_of_hour_local) == 9:
+        return CURRENT_OBSERVATIONS_9AM_FILE
+    return CURRENT_OBSERVATIONS_FILE
 
 
 def fetch_sdk_raw_observations_with_retries(
@@ -251,11 +280,23 @@ def summarize_current_observation_for_date(
     day = date.fromisoformat(contract_date[:10])
     tz = ZoneInfo(timezone)
     day_start_utc = datetime.combine(day, datetime.min.time(), tzinfo=tz).astimezone(UTC)
-    candidates = frame.loc[
+    same_day = frame.loc[
         (frame["observed_at_utc"] >= pd.Timestamp(day_start_utc))
-        & (frame["observed_at_utc"] <= pd.Timestamp(as_of_utc))
         & (frame["observed_at_local"].dt.date == day)
     ].copy()
+    if _uses_observation_window(timing_mode):
+        window_start_utc, window_end_utc = _observation_window_utc(contract_date, timezone, as_of_hour_local)
+        candidates = same_day.loc[
+            (same_day["observed_at_utc"] >= pd.Timestamp(window_start_utc))
+            & (same_day["observed_at_utc"] <= pd.Timestamp(window_end_utc))
+        ].copy()
+        unavailable_reason = (
+            f"No SDK observation inside local {as_of_hour_local:02d}:00 "
+            "observation window"
+        )
+    else:
+        candidates = same_day.loc[same_day["observed_at_utc"] <= pd.Timestamp(as_of_utc)].copy()
+        unavailable_reason = "No SDK observation at or before local as-of time"
     if candidates.empty:
         return unavailable_current_observation_row(
             station_id=station_id,
@@ -265,13 +306,16 @@ def summarize_current_observation_for_date(
             contract_date=contract_date,
             timing_mode=timing_mode,
             as_of_hour_local=as_of_hour_local,
-            reason="No SDK observation at or before local as-of time",
+            reason=unavailable_reason,
         )
     row = candidates.sort_values(["observed_at_utc", "source"], na_position="first").iloc[-1]
     observed_at_utc = pd.Timestamp(row["observed_at_utc"]).to_pydatetime()
     observed_at_local = observed_at_utc.astimezone(tz)
     age_minutes = (as_of_utc - observed_at_utc).total_seconds() / 60
+    history = same_day.loc[same_day["observed_at_utc"] <= pd.Timestamp(observed_at_utc)].copy()
     temp_f = _number(row.get("temp_f"))
+    high_temp_f = _max_number(history.get("temp_f"))
+    trend_features = _morning_temperature_trend_features(history, row)
     dewpoint_f = _number(row.get("dewpoint_f"))
     humidity = _relative_humidity_pct(temp_f, dewpoint_f)
     wind_speed_mph = _kt_to_mph(row.get("wind_speed_kt"))
@@ -285,6 +329,7 @@ def summarize_current_observation_for_date(
         "contract_date": contract_date[:10],
         "timing_mode": timing_mode,
         "observed_temp_at_as_of_f": temp_f,
+        "observed_high_temp_through_as_of_f": high_temp_f,
         "observed_dewpoint_at_as_of_f": dewpoint_f,
         "observed_humidity_at_as_of": humidity,
         "observed_wind_speed_at_as_of": wind_speed_mph,
@@ -303,6 +348,7 @@ def summarize_current_observation_for_date(
         "observed_weather_code_at_as_of": _clean_text(row.get("weather_codes")),
         "observed_precip_recent_at_as_of": _number(row.get("precip_1hr_inches")),
         "observed_snow_depth_at_as_of": _number(row.get("snow_depth_inches")),
+        **trend_features,
         "observed_as_of_time_local": observed_at_local.isoformat(),
         "observed_as_of_time_utc": observed_at_utc.astimezone(UTC).isoformat().replace("+00:00", "Z"),
         "observed_as_of_age_minutes": float(age_minutes),
@@ -314,6 +360,19 @@ def summarize_current_observation_for_date(
         "observed_fetch_status": "ok",
         "observed_unavailable_reason": pd.NA,
     }
+
+
+def _uses_observation_window(timing_mode: str) -> bool:
+    return timing_mode in {TIMING_MODE_SAME_DAY_9AM_LIVE_SAFE, TIMING_MODE_SAME_DAY_1PM_LIVE_SAFE}
+
+
+def _observation_window_utc(
+    contract_date: str,
+    timezone: str,
+    as_of_hour_local: int,
+) -> tuple[datetime, datetime]:
+    as_of = local_datetime_utc(contract_date, timezone, as_of_hour_local)
+    return as_of - timedelta(minutes=10), as_of + timedelta(minutes=10)
 
 
 def unavailable_current_observation_row(
@@ -335,6 +394,7 @@ def unavailable_current_observation_row(
         "contract_date": contract_date[:10],
         "timing_mode": timing_mode,
         "observed_temp_at_as_of_f": pd.NA,
+        "observed_high_temp_through_as_of_f": pd.NA,
         "observed_dewpoint_at_as_of_f": pd.NA,
         "observed_humidity_at_as_of": pd.NA,
         "observed_wind_speed_at_as_of": pd.NA,
@@ -353,6 +413,12 @@ def unavailable_current_observation_row(
         "observed_weather_code_at_as_of": pd.NA,
         "observed_precip_recent_at_as_of": pd.NA,
         "observed_snow_depth_at_as_of": pd.NA,
+        "observed_temp_change_last_1h_f": pd.NA,
+        "observed_temp_change_last_3h_f": pd.NA,
+        "observed_morning_warmup_rate_f_per_hour": pd.NA,
+        "observed_high_so_far_change_since_9am_f": pd.NA,
+        "observed_temp_change_since_11am_f": pd.NA,
+        "observed_high_so_far_change_since_11am_f": pd.NA,
         "observed_as_of_time_local": pd.NA,
         "observed_as_of_time_utc": as_of_utc.isoformat().replace("+00:00", "Z"),
         "observed_as_of_age_minutes": pd.NA,
@@ -418,6 +484,90 @@ def _number(value: Any) -> float | Any:
     if math.isnan(number):
         return pd.NA
     return number
+
+
+def _max_number(values: Any) -> float | Any:
+    numeric = pd.to_numeric(values, errors="coerce")
+    if numeric.notna().any():
+        return float(numeric.max())
+    return pd.NA
+
+
+def _morning_temperature_trend_features(frame: pd.DataFrame, selected_row: pd.Series) -> dict[str, Any]:
+    observed_at_local = pd.Timestamp(selected_row.get("observed_at_local"))
+    temp_now = _number(selected_row.get("temp_f"))
+    if pd.isna(observed_at_local) or pd.isna(temp_now):
+        return {
+            "observed_temp_change_last_1h_f": pd.NA,
+            "observed_temp_change_last_3h_f": pd.NA,
+            "observed_morning_warmup_rate_f_per_hour": pd.NA,
+            "observed_high_so_far_change_since_9am_f": pd.NA,
+            "observed_temp_change_since_11am_f": pd.NA,
+            "observed_high_so_far_change_since_11am_f": pd.NA,
+        }
+
+    temp_last_1h = _temp_at_or_before(frame, observed_at_local - timedelta(hours=1))
+    temp_last_3h = _temp_at_or_before(frame, observed_at_local - timedelta(hours=3))
+    nine_am = observed_at_local.normalize().replace(hour=9)
+    eleven_am = observed_at_local.normalize().replace(hour=11)
+    temp_at_9am = _temp_at_or_before(frame, nine_am)
+    temp_at_11am = _temp_at_or_before(frame, eleven_am)
+    high_so_far_at_9am = _high_temp_at_or_before(frame, nine_am)
+    high_so_far_at_11am = _high_temp_at_or_before(frame, eleven_am)
+    high_so_far_now = _max_number(
+        frame.loc[frame["observed_at_local"] <= observed_at_local, "temp_f"]
+    )
+
+    hours_since_9am = (observed_at_local - nine_am).total_seconds() / 3600
+    morning_warmup_rate = pd.NA
+    if not pd.isna(temp_at_9am) and hours_since_9am > 0:
+        morning_warmup_rate = (float(temp_now) - float(temp_at_9am)) / hours_since_9am
+
+    high_so_far_change = pd.NA
+    if not pd.isna(high_so_far_now) and not pd.isna(high_so_far_at_9am):
+        high_so_far_change = float(high_so_far_now) - float(high_so_far_at_9am)
+
+    high_so_far_change_since_11am = pd.NA
+    if not pd.isna(high_so_far_now) and not pd.isna(high_so_far_at_11am):
+        high_so_far_change_since_11am = float(high_so_far_now) - float(high_so_far_at_11am)
+
+    return {
+        "observed_temp_change_last_1h_f": _difference(temp_now, temp_last_1h),
+        "observed_temp_change_last_3h_f": _difference(temp_now, temp_last_3h),
+        "observed_morning_warmup_rate_f_per_hour": morning_warmup_rate,
+        "observed_high_so_far_change_since_9am_f": high_so_far_change,
+        "observed_temp_change_since_11am_f": _difference(temp_now, temp_at_11am),
+        "observed_high_so_far_change_since_11am_f": high_so_far_change_since_11am,
+    }
+
+
+def _temp_at_or_before(frame: pd.DataFrame, cutoff_local: pd.Timestamp) -> float | Any:
+    if frame.empty or "observed_at_local" not in frame:
+        return pd.NA
+    prior = frame.loc[frame["observed_at_local"] <= cutoff_local].copy()
+    if prior.empty:
+        return pd.NA
+    prior["temp_f"] = pd.to_numeric(prior.get("temp_f"), errors="coerce")
+    prior = prior.dropna(subset=["temp_f"])
+    if prior.empty:
+        return pd.NA
+    prior = prior.sort_values("observed_at_local", ascending=True)
+    return float(prior.iloc[-1]["temp_f"])
+
+
+def _high_temp_at_or_before(frame: pd.DataFrame, cutoff_local: pd.Timestamp) -> float | Any:
+    if frame.empty or "observed_at_local" not in frame:
+        return pd.NA
+    prior = frame.loc[frame["observed_at_local"] <= cutoff_local].copy()
+    if prior.empty:
+        return pd.NA
+    return _max_number(prior.get("temp_f"))
+
+
+def _difference(current: Any, previous: Any) -> float | Any:
+    if pd.isna(current) or pd.isna(previous):
+        return pd.NA
+    return float(current) - float(previous)
 
 
 def _clean_text(value: Any) -> str | Any:

@@ -26,6 +26,9 @@ ACTUAL_COLUMNS = [
     "raw_observation_count",
 ]
 
+ONE_MINUTE_SANITY_HIGH_F = 110.0
+ONE_MINUTE_SANITY_DELTA_F = 15.0
+
 
 def local_day_window(date_local: str | date, timezone: str) -> tuple[datetime, datetime, datetime, datetime]:
     day = date.fromisoformat(date_local) if isinstance(date_local, str) else date_local
@@ -87,6 +90,7 @@ def _fetch_us_station_actual_rows_batched(group: pd.DataFrame, raw_dir: Path, fo
     clean = clean.dropna(subset=["target_date_obj"])
     rows_by_date = {str(row["target_date_local"]): row for _, row in clean.iterrows()}
     completed: set[str] = set()
+    fallback_rows_by_date: dict[str, dict[str, Any]] = {}
 
     for chunk_start, chunk_end in _date_chunks(sorted(clean["target_date_obj"].unique()), chunk_days=31):
         try:
@@ -101,8 +105,16 @@ def _fetch_us_station_actual_rows_batched(group: pd.DataFrame, raw_dir: Path, fo
                     continue
                 day_obs.attrs["source"] = obs.attrs.get("source", "iem_asos_1min")
                 try:
-                    rows.append(_observations_to_actual_row(day_obs, rows_by_date[target_date], target_date, timezone))
-                    completed.add(target_date)
+                    actual = _observations_to_actual_row(day_obs, rows_by_date[target_date], target_date, timezone)
+                    if _actual_row_is_ok(actual) and not _actual_row_needs_hourly_sanity_check(actual):
+                        rows.append(actual)
+                        completed.add(target_date)
+                        fallback_rows_by_date.pop(target_date, None)
+                    else:
+                        fallback_rows_by_date[target_date] = _choose_better_actual_row(
+                            fallback_rows_by_date.get(target_date),
+                            actual,
+                        )
                 except Exception as exc:  # noqa: BLE001
                     logging.info("Batched actuals parse failed for %s %s: %s", station, target_date, exc)
         except Exception as exc:  # noqa: BLE001
@@ -122,8 +134,14 @@ def _fetch_us_station_actual_rows_batched(group: pd.DataFrame, raw_dir: Path, fo
                     continue
                 day_obs.attrs["source"] = obs.attrs.get("source", "iem_asos_hourly")
                 try:
-                    rows.append(_observations_to_actual_row(day_obs, rows_by_date[target_date], target_date, timezone))
-                    completed.add(target_date)
+                    actual = _observations_to_actual_row(day_obs, rows_by_date[target_date], target_date, timezone)
+                    best = _choose_better_actual_row(fallback_rows_by_date.get(target_date), actual)
+                    if _actual_row_is_ok(best):
+                        rows.append(best)
+                        completed.add(target_date)
+                        fallback_rows_by_date.pop(target_date, None)
+                    else:
+                        fallback_rows_by_date[target_date] = best
                 except Exception as exc:  # noqa: BLE001
                     logging.info("Batched hourly actuals parse failed for %s %s: %s", station, target_date, exc)
         except Exception as exc:  # noqa: BLE001
@@ -131,10 +149,15 @@ def _fetch_us_station_actual_rows_batched(group: pd.DataFrame, raw_dir: Path, fo
 
     for _, row in clean.iterrows():
         target_date = str(row["target_date_local"])
-        if target_date not in completed:
+        if target_date not in completed and target_date not in fallback_rows_by_date:
             actual = _fetch_single_actual_row(row, raw_dir, force_refresh)
             if actual:
-                rows.append(actual)
+                if _actual_row_is_ok(actual):
+                    rows.append(actual)
+                    completed.add(target_date)
+                else:
+                    fallback_rows_by_date[target_date] = actual
+    rows.extend(row for target_date, row in sorted(fallback_rows_by_date.items()) if target_date not in completed)
     return rows
 
 
@@ -174,18 +197,135 @@ def fetch_station_observations(
     force_refresh: bool = False,
 ) -> pd.DataFrame:
     if station_code.startswith("K"):
+        fallback_candidate: pd.DataFrame | None = None
         try:
             frame = fetch_iem_asos_1min(station_code, target_date_local, timezone, raw_dir, force_refresh=force_refresh)
             if not frame.empty:
                 frame.attrs["source"] = "iem_asos_1min"
-                return frame
+                if _observation_frame_is_ok(frame, target_date_local) and not _observation_frame_needs_hourly_sanity_check(
+                    frame,
+                    target_date_local,
+                ):
+                    return frame
+                fallback_candidate = frame
         except Exception as exc:  # noqa: BLE001
             logging.info("IEM 1-minute unavailable for %s %s: %s", station_code, target_date_local, exc)
         frame = fetch_iem_asos_hourly(station_code, target_date_local, timezone, raw_dir, force_refresh=force_refresh)
         if not frame.empty:
             frame.attrs["source"] = "iem_asos_hourly"
-            return frame
+            if fallback_candidate is None:
+                return frame
+            return _choose_better_observation_frame(fallback_candidate, frame, target_date_local)
+        if fallback_candidate is not None:
+            return fallback_candidate
     raise RuntimeError("No verified official actual-temperature source implemented for this station")
+
+
+def _actual_row_is_ok(row: dict[str, Any] | None) -> bool:
+    return bool(row) and str(row.get("data_quality_flag", "")).lower() == "ok"
+
+
+def _choose_better_actual_row(current: dict[str, Any] | None, candidate: dict[str, Any]) -> dict[str, Any]:
+    if not current:
+        return candidate
+    if _actual_row_is_ok(current) and _actual_row_is_ok(candidate):
+        if _actual_row_is_suspicious_against_hourly(current, candidate):
+            return candidate
+        if _actual_row_is_suspicious_against_hourly(candidate, current):
+            return current
+        return current
+    if _actual_row_is_ok(candidate) and not _actual_row_is_ok(current):
+        return candidate
+    if _actual_row_is_ok(current) and not _actual_row_is_ok(candidate):
+        return current
+    return candidate if _actual_row_quality_score(candidate) > _actual_row_quality_score(current) else current
+
+
+def _actual_row_needs_hourly_sanity_check(row: dict[str, Any]) -> bool:
+    return str(row.get("source", "")) == "iem_asos_1min" and _actual_row_is_ok(row) and _actual_high(row) >= ONE_MINUTE_SANITY_HIGH_F
+
+
+def _actual_row_is_suspicious_against_hourly(primary: dict[str, Any], fallback: dict[str, Any]) -> bool:
+    if str(primary.get("source", "")) != "iem_asos_1min" or str(fallback.get("source", "")) != "iem_asos_hourly":
+        return False
+    if not _actual_row_is_ok(fallback):
+        return False
+    primary_high = _actual_high(primary)
+    fallback_high = _actual_high(fallback)
+    return primary_high >= ONE_MINUTE_SANITY_HIGH_F and primary_high - fallback_high >= ONE_MINUTE_SANITY_DELTA_F
+
+
+def _actual_high(row: dict[str, Any]) -> float:
+    try:
+        return float(row.get("actual_high_f"))
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _actual_row_quality_score(row: dict[str, Any]) -> tuple[float, int]:
+    source = str(row.get("source", ""))
+    expected = 18 if source == "iem_asos_hourly" else 24 * 60 * 0.75
+    count = int(row.get("raw_observation_count") or 0)
+    return (count / expected if expected else 0.0, count)
+
+
+def _observation_frame_is_ok(obs: pd.DataFrame, target_date: str) -> bool:
+    count = _target_day_observation_count(obs, target_date)
+    expected = 18 if obs.attrs.get("source") == "iem_asos_hourly" else 24 * 60 * 0.75
+    return count >= expected
+
+
+def _observation_frame_needs_hourly_sanity_check(obs: pd.DataFrame, target_date: str) -> bool:
+    return (
+        obs.attrs.get("source") == "iem_asos_1min"
+        and _observation_frame_is_ok(obs, target_date)
+        and _target_day_high(obs, target_date) >= ONE_MINUTE_SANITY_HIGH_F
+    )
+
+
+def _choose_better_observation_frame(current: pd.DataFrame, candidate: pd.DataFrame, target_date: str) -> pd.DataFrame:
+    if _observation_frame_is_ok(current, target_date) and _observation_frame_is_ok(candidate, target_date):
+        if _observation_frame_is_suspicious_against_hourly(current, candidate, target_date):
+            return candidate
+        if _observation_frame_is_suspicious_against_hourly(candidate, current, target_date):
+            return current
+        return current
+    current_count = _target_day_observation_count(current, target_date)
+    candidate_count = _target_day_observation_count(candidate, target_date)
+    current_expected = 18 if current.attrs.get("source") == "iem_asos_hourly" else 24 * 60 * 0.75
+    candidate_expected = 18 if candidate.attrs.get("source") == "iem_asos_hourly" else 24 * 60 * 0.75
+    current_score = (current_count / current_expected if current_expected else 0.0, current_count)
+    candidate_score = (candidate_count / candidate_expected if candidate_expected else 0.0, candidate_count)
+    return candidate if candidate_score > current_score else current
+
+
+def _observation_frame_is_suspicious_against_hourly(
+    primary: pd.DataFrame,
+    fallback: pd.DataFrame,
+    target_date: str,
+) -> bool:
+    if primary.attrs.get("source") != "iem_asos_1min" or fallback.attrs.get("source") != "iem_asos_hourly":
+        return False
+    primary_high = _target_day_high(primary, target_date)
+    fallback_high = _target_day_high(fallback, target_date)
+    return primary_high >= ONE_MINUTE_SANITY_HIGH_F and primary_high - fallback_high >= ONE_MINUTE_SANITY_DELTA_F
+
+
+def _target_day_high(obs: pd.DataFrame, target_date: str) -> float:
+    if obs.empty or "valid_local" not in obs or "tmpf" not in obs:
+        return float("nan")
+    day = date.fromisoformat(target_date)
+    values = obs.loc[obs["valid_local"].dt.date == day, "tmpf"]
+    if values.empty:
+        return float("nan")
+    return float(values.max())
+
+
+def _target_day_observation_count(obs: pd.DataFrame, target_date: str) -> int:
+    if obs.empty or "valid_local" not in obs or "tmpf" not in obs:
+        return 0
+    day = date.fromisoformat(target_date)
+    return int(obs.loc[obs["valid_local"].dt.date == day, "tmpf"].count())
 
 
 def fetch_iem_asos_1min(
