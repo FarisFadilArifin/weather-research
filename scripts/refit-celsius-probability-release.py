@@ -120,8 +120,10 @@ def serving_point_predictions(
     observed = pd.to_numeric(
         frame["observed_high_temp_through_as_of_f"], errors="coerce"
     )
-    if observed.isna().any():
-        raise ValueError("serving replay has missing observed high")
+    frame = frame.loc[observed.notna()].copy()
+    observed = observed.loc[frame.index]
+    if frame.empty:
+        raise ValueError("serving replay has no rows with an observed high")
     model_frame = frame.reindex(columns=feature_names)
     base_columns: dict[str, np.ndarray] = {}
     long_parts: list[pd.DataFrame] = []
@@ -264,6 +266,10 @@ def main() -> int:
         "probability_manifest_sha256": sha256_file(manifest_path),
         "forward_metrics": celsius_probability_metrics(forward).iloc[0].to_dict(),
         "exploratory_2026_serving_point_metrics": holdout_metrics.iloc[0].to_dict(),
+        "exploratory_2026_serving_point_rows": int(len(holdout)),
+        "exploratory_2026_excluded_missing_observed_high": int(
+            pd.to_datetime(features["contract_date"]).dt.year.eq(2026).sum() - len(live_point)
+        ),
         "promotion_eligible": False,
         "promotion_blocker": (
             "fresh outcomes after the 2026-07-25 point-model training cutoff are required"
