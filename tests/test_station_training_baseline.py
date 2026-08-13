@@ -177,6 +177,7 @@ def test_seoul_and_tokyo_follow_station_baseline_contract() -> None:
             "model_version": "station_high_regressor_baseline_seoul_no_peak_stack",
             "evaluation_years": [2022, 2025],
             "live_model_version": "station_high_regressor_live_seoul_no_peak_stack_2026",
+            "optuna_storage_name": "RKSI_optuna.sqlite3",
         },
         "Tokyo": {
             "station_id": "RJTT",
@@ -185,6 +186,7 @@ def test_seoul_and_tokyo_follow_station_baseline_contract() -> None:
             "model_version": "station_high_regressor_baseline_tokyo_no_peak_stack",
             "evaluation_years": [2022, 2025],
             "live_model_version": "station_high_regressor_live_tokyo_no_peak_stack_2026",
+            "optuna_storage_name": "RJTT_optuna_no_fullday_high.sqlite3",
         },
     }
     for station_key, contract in expected.items():
@@ -205,6 +207,11 @@ def test_seoul_and_tokyo_follow_station_baseline_contract() -> None:
         )
         assert "PROBABILITY_FORWARD_VALIDATION_YEARS = (2025,)" in source
         assert "run_station_year_split_experiment(config)" in source
+        assert "optuna_verbose=True" in source
+        assert (
+            f'optuna_storage_path=OUTPUT_DIR / "{contract["optuna_storage_name"]}"'
+            in source
+        )
         if station_key in {"Seoul", "Tokyo"}:
             assert "fit_celsius_probability_system(" in source
             assert 'PROBABILITY_TARGET = "celsius_market_1c"' in source
@@ -271,15 +278,22 @@ def test_seoul_and_tokyo_follow_station_baseline_contract() -> None:
         assert metadata["ordinal_challenger_exports_model_weights"] is False
 
 
-def test_tokyo_celsius_reporting_converts_absolute_temperatures_only() -> None:
-    _, source = _notebook_source("Tokyo")
-    reporting_start = source.index("## Celsius reporting and export")
-    reporting_end = source.index("if EXPORT_MODEL_WEIGHTS:", reporting_start)
-    reporting = source[reporting_start:reporting_end]
-    assert 'for column in ("actual_high_f", "predicted_high_f"):' in reporting
-    assert 'pd.to_numeric(celsius_predictions[column], errors="coerce") - 32.0' in reporting
-    assert 'celsius_predictions["error_c"]' in reporting
-    assert 'pd.to_numeric(celsius_predictions["error_f"], errors="coerce") * 5.0 / 9.0' in reporting
+def test_seoul_and_tokyo_celsius_reporting_convert_absolute_temperatures_only() -> None:
+    for station_key in ("Seoul", "Tokyo"):
+        _, source = _notebook_source(station_key)
+        reporting_start = source.index("## Celsius reporting and export")
+        reporting_end = source.index("if EXPORT_MODEL_WEIGHTS:", reporting_start)
+        reporting = source[reporting_start:reporting_end]
+        assert 'for column in ("actual_high_f", "predicted_high_f"):' in reporting
+        assert (
+            'pd.to_numeric(celsius_predictions[column], errors="coerce") - 32.0'
+            in reporting
+        )
+        assert 'celsius_predictions["error_c"]' in reporting
+        assert (
+            'pd.to_numeric(celsius_predictions["error_f"], errors="coerce") * 5.0 / 9.0'
+            in reporting
+        )
 
 
 def test_regeneration_preserves_existing_notebook_outputs_and_metadata() -> None:

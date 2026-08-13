@@ -272,7 +272,7 @@ if EXPORT_MODEL_WEIGHTS:
         "## V11 Feature Coverage",
         "## Point-model feature coverage",
     )
-    if station_id == "RJTT":
+    if config.get("probability_target") == "celsius_market_1c":
         _replace_required(
             notebook,
             """celsius_predictions = result.test_predictions.copy()
@@ -293,7 +293,7 @@ if "error_f" in celsius_predictions:
     )
 celsius_predictions.head()
 """,
-            setting="tokyo_celsius_reporting_conversion",
+            setting="asia_celsius_reporting_conversion",
         )
     _replace_in_cells(
         notebook,
