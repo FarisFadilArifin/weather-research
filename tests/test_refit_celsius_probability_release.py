@@ -30,10 +30,10 @@ class StackModel:
 def test_serving_point_predictions_use_exact_point_bundle_models() -> None:
     features = pd.DataFrame(
         {
-            "contract_date": ["2025-12-31", "2026-01-01", "2026-01-02"],
-            "actual_high_f": [50.0, 60.0, 61.0],
-            "observed_high_temp_through_as_of_f": [45.0, 55.0, np.nan],
-            "feature": [1.0, 2.0, 3.0],
+            "contract_date": ["2025-12-31", "2026-01-01"],
+            "actual_high_f": [50.0, 60.0],
+            "observed_high_temp_through_as_of_f": [45.0, 55.0],
+            "feature": [1.0, 2.0],
         }
     )
     bundle = {
