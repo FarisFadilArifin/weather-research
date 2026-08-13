@@ -9,6 +9,9 @@ from src.calibration.bucket_probability import (
     CandidateSpec,
     FEATURE_PROFILE_ASIA_NO_PEAK,
     FEATURE_PROFILE_KDAL_1PM,
+    FEATURE_PROFILE_EXPERT_ENSEMBLE_ASIA_NO_PEAK,
+    FEATURE_PROFILE_EXPERT_ENSEMBLE_COMMON_NO_PEAK,
+    EXPERT_ENSEMBLE_BASE_METHODS,
     OFFSET_LABELS,
     build_probability_frame,
     canonical_two_degree_bucket,
@@ -37,6 +40,48 @@ def test_asia_probability_profile_uses_gfs_gefs_and_jma_contract() -> None:
     assert "hrrr_high_f" not in features
     assert "nbm_high_f" not in features
     assert not any("peak" in name.lower() for name in features)
+
+
+def test_expert_ensemble_probability_profiles_have_61_inputs() -> None:
+    common = probability_feature_names(
+        include_peak_features=False,
+        feature_profile=FEATURE_PROFILE_EXPERT_ENSEMBLE_COMMON_NO_PEAK,
+    )
+    asia = probability_feature_names(
+        include_peak_features=False,
+        feature_profile=FEATURE_PROFILE_EXPERT_ENSEMBLE_ASIA_NO_PEAK,
+    )
+    assert len(common) == len(asia) == 61
+    for method in EXPERT_ENSEMBLE_BASE_METHODS:
+        assert f"{method}_predicted_high_f" in common
+        assert f"{method}_minus_point_f" in common
+    assert "hrrr_minus_point_f" in common and "hrrr_minus_point_f" not in asia
+    assert "jma_msm_minus_point_f" in asia and "jma_msm_minus_point_f" not in common
+
+
+def test_expert_ensemble_probability_frame_uses_declared_four_methods() -> None:
+    date = pd.Timestamp("2025-07-01")
+    features = pd.DataFrame([{
+        "contract_date": date,
+        "gfs_high_f": 91.0,
+        "hrrr_high_f": 92.0,
+        "nbm_high_f": 90.0,
+        "observed_temp_at_as_of_f": 84.0,
+        "observed_high_temp_through_as_of_f": 85.0,
+        "observed_as_of_age_minutes": 0.0,
+    }])
+    point = pd.DataFrame([{"contract_date": date, "actual_high_f": 92.0, "predicted_high_f": 91.5}])
+    base = pd.DataFrame([
+        {"contract_date": date, "method": method, "predicted_high_f": 90.0 + index}
+        for index, method in enumerate(EXPERT_ENSEMBLE_BASE_METHODS)
+    ])
+    result = build_probability_frame(
+        features, point, base, include_peak_features=False,
+        feature_profile=FEATURE_PROFILE_EXPERT_ENSEMBLE_COMMON_NO_PEAK,
+    )
+    assert len(result) == 1
+    assert math.isclose(result.loc[0, "base_prediction_mean_f"], 91.5)
+    assert all(result.loc[0, f"{method}_predicted_high_f"] == 90.0 + index for index, method in enumerate(EXPERT_ENSEMBLE_BASE_METHODS))
 
 
 def test_build_asia_probability_frame_uses_asia_mandatory_providers() -> None:

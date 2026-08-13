@@ -25,6 +25,12 @@ ARTIFACT_TYPE = "station_bucket_probability_model"
 OFFSET_LABELS = ("le_-4", "-3", "-2", "-1", "0", "+1", "+2", "+3", "ge_+4")
 CENTRAL_OFFSETS = (-3, -2, -1, 0, 1, 2, 3)
 BASE_METHODS = ("xgboost", "lightgbm", "catboost")
+EXPERT_ENSEMBLE_BASE_METHODS = (
+    "full_xgboost",
+    "forecast_huber",
+    "observation_catboost",
+    "seasonal_ridge",
+)
 PROVIDERS = ("gfs", "hrrr", "nbm")
 ASIA_PROVIDERS = ("gfs", "gefs", "jma_msm")
 EFFECTIVE_TIE_TOLERANCE = 1e-3
@@ -32,11 +38,15 @@ FEATURE_PROFILE_COMMON_NO_PEAK = "common_no_peak"
 FEATURE_PROFILE_PEAK_AUGMENTED = "peak_augmented"
 FEATURE_PROFILE_KDAL_1PM = "kdal_1pm"
 FEATURE_PROFILE_ASIA_NO_PEAK = "asia_no_peak"
+FEATURE_PROFILE_EXPERT_ENSEMBLE_COMMON_NO_PEAK = "expert_ensemble_common_no_peak"
+FEATURE_PROFILE_EXPERT_ENSEMBLE_ASIA_NO_PEAK = "expert_ensemble_asia_no_peak"
 FEATURE_PROFILES = (
     FEATURE_PROFILE_COMMON_NO_PEAK,
     FEATURE_PROFILE_PEAK_AUGMENTED,
     FEATURE_PROFILE_KDAL_1PM,
     FEATURE_PROFILE_ASIA_NO_PEAK,
+    FEATURE_PROFILE_EXPERT_ENSEMBLE_COMMON_NO_PEAK,
+    FEATURE_PROFILE_EXPERT_ENSEMBLE_ASIA_NO_PEAK,
 )
 
 MANDATORY_SOURCE_FEATURES = (
@@ -154,6 +164,40 @@ ASIA_DERIVED_FEATURES = (
     "point_minus_observed_high_f",
 )
 
+
+def _base_derived_features(methods: Sequence[str]) -> tuple[str, ...]:
+    return (
+        "point_prediction_f",
+        "rounded_point_degree_f",
+        "point_rounding_remainder_f",
+        "point_distance_to_round_boundary_f",
+        "point_signed_distance_to_round_boundary_f",
+        *(f"{method}_predicted_high_f" for method in methods),
+        "base_prediction_mean_f",
+        "base_prediction_spread_f",
+        "base_prediction_std_f",
+        *(f"{method}_minus_point_f" for method in methods),
+    )
+
+
+EXPERT_ENSEMBLE_DERIVED_FEATURES = (
+    *_base_derived_features(EXPERT_ENSEMBLE_BASE_METHODS),
+    "gfs_minus_point_f",
+    "hrrr_minus_point_f",
+    "nbm_minus_point_f",
+    "point_minus_observed_temp_f",
+    "point_minus_observed_high_f",
+)
+
+EXPERT_ENSEMBLE_ASIA_DERIVED_FEATURES = (
+    *_base_derived_features(EXPERT_ENSEMBLE_BASE_METHODS),
+    "gfs_minus_point_f",
+    "gefs_minus_point_f",
+    "jma_msm_minus_point_f",
+    "point_minus_observed_temp_f",
+    "point_minus_observed_high_f",
+)
+
 MISSING_INDICATOR_SUFFIX = "__missing"
 
 
@@ -194,9 +238,21 @@ def _resolve_feature_profile(*, include_peak_features: bool, feature_profile: st
 def probability_provider_names(feature_profile: str) -> tuple[str, ...]:
     return (
         ASIA_PROVIDERS
-        if feature_profile == FEATURE_PROFILE_ASIA_NO_PEAK
+        if feature_profile in (
+            FEATURE_PROFILE_ASIA_NO_PEAK,
+            FEATURE_PROFILE_EXPERT_ENSEMBLE_ASIA_NO_PEAK,
+        )
         else PROVIDERS
     )
+
+
+def probability_base_methods(feature_profile: str) -> tuple[str, ...]:
+    if feature_profile in (
+        FEATURE_PROFILE_EXPERT_ENSEMBLE_COMMON_NO_PEAK,
+        FEATURE_PROFILE_EXPERT_ENSEMBLE_ASIA_NO_PEAK,
+    ):
+        return EXPERT_ENSEMBLE_BASE_METHODS
+    return BASE_METHODS
 
 
 def probability_mandatory_feature_names(
@@ -204,7 +260,10 @@ def probability_mandatory_feature_names(
 ) -> tuple[str, ...]:
     return (
         ASIA_MANDATORY_SOURCE_FEATURES
-        if feature_profile == FEATURE_PROFILE_ASIA_NO_PEAK
+        if feature_profile in (
+            FEATURE_PROFILE_ASIA_NO_PEAK,
+            FEATURE_PROFILE_EXPERT_ENSEMBLE_ASIA_NO_PEAK,
+        )
         else MANDATORY_SOURCE_FEATURES
     )
 
@@ -212,6 +271,10 @@ def probability_mandatory_feature_names(
 def _profile_feature_contract(
     feature_profile: str,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if feature_profile == FEATURE_PROFILE_EXPERT_ENSEMBLE_ASIA_NO_PEAK:
+        return EXPERT_ENSEMBLE_ASIA_DERIVED_FEATURES, ASIA_SOURCE_FEATURES
+    if feature_profile == FEATURE_PROFILE_EXPERT_ENSEMBLE_COMMON_NO_PEAK:
+        return EXPERT_ENSEMBLE_DERIVED_FEATURES, COMMON_SOURCE_FEATURES
     if feature_profile == FEATURE_PROFILE_ASIA_NO_PEAK:
         return ASIA_DERIVED_FEATURES, ASIA_SOURCE_FEATURES
     sources = (
@@ -282,38 +345,36 @@ def build_probability_frame(
     point = point.dropna(subset=["contract_date", "actual_high_f", "predicted_high_f"])
     point = point.rename(columns={"predicted_high_f": "point_prediction_f"})
 
+    features = feature_frame.copy()
+    features["contract_date"] = pd.to_datetime(features["contract_date"], errors="coerce")
+    if features["contract_date"].duplicated().any():
+        raise ValueError("feature frame has duplicate contract dates")
+    resolved_profile = _resolve_feature_profile(
+        include_peak_features=include_peak_features,
+        feature_profile=feature_profile,
+    )
+    base_methods = probability_base_methods(resolved_profile)
     base = base_validation_predictions.loc[
-        base_validation_predictions["method"].isin(BASE_METHODS),
+        base_validation_predictions["method"].isin(base_methods),
         ["contract_date", "method", "predicted_high_f"],
     ].copy()
     base["contract_date"] = pd.to_datetime(base["contract_date"], errors="coerce")
     duplicate = base.duplicated(["contract_date", "method"], keep=False)
     if duplicate.any():
-        conflicts = (
-            base.loc[duplicate]
-            .groupby(["contract_date", "method"])["predicted_high_f"]
-            .nunique(dropna=False)
-        )
+        conflicts = base.loc[duplicate].groupby(["contract_date", "method"])["predicted_high_f"].nunique(dropna=False)
         if conflicts.gt(1).any():
             raise ValueError("conflicting base OOF predictions for station-date")
         base = base.drop_duplicates(["contract_date", "method"])
     base = base.pivot(index="contract_date", columns="method", values="predicted_high_f")
-    base = base.rename(columns={name: f"{name}_predicted_high_f" for name in BASE_METHODS})
+    base = base.rename(columns={name: f"{name}_predicted_high_f" for name in base_methods})
     base = base.reset_index()
 
-    features = feature_frame.copy()
-    features["contract_date"] = pd.to_datetime(features["contract_date"], errors="coerce")
-    if features["contract_date"].duplicated().any():
-        raise ValueError("feature frame has duplicate contract dates")
     merged = point.merge(base, on="contract_date", how="inner", validate="one_to_one")
     merged = merged.merge(features, on="contract_date", how="left", validate="one_to_one", suffixes=("", "_feature"))
-    resolved_profile = _resolve_feature_profile(
-        include_peak_features=include_peak_features,
-        feature_profile=feature_profile,
-    )
     merged = add_probability_features(
         merged,
         providers=probability_provider_names(resolved_profile),
+        base_methods=base_methods,
     )
     core_feature_names = [
         name
@@ -329,7 +390,7 @@ def build_probability_frame(
     serving_required = [
         *probability_mandatory_feature_names(resolved_profile),
         "point_prediction_f",
-        *(f"{name}_predicted_high_f" for name in BASE_METHODS),
+        *(f"{name}_predicted_high_f" for name in base_methods),
     ]
     merged = merged.dropna(subset=serving_required).copy()
     for name in probability_optional_feature_names(
@@ -350,6 +411,7 @@ def add_probability_features(
     frame: pd.DataFrame,
     *,
     providers: Sequence[str] = PROVIDERS,
+    base_methods: Sequence[str] = BASE_METHODS,
 ) -> pd.DataFrame:
     out = frame.copy()
     point = pd.to_numeric(out["point_prediction_f"], errors="coerce")
@@ -361,12 +423,12 @@ def add_probability_features(
     out["point_signed_distance_to_round_boundary_f"] = np.where(
         remainder.ge(0.0), remainder - 0.5, remainder + 0.5
     )
-    base_columns = [f"{name}_predicted_high_f" for name in BASE_METHODS]
+    base_columns = [f"{name}_predicted_high_f" for name in base_methods]
     base = out.reindex(columns=base_columns).apply(pd.to_numeric, errors="coerce")
     out["base_prediction_mean_f"] = base.mean(axis=1)
     out["base_prediction_spread_f"] = base.max(axis=1) - base.min(axis=1)
     out["base_prediction_std_f"] = base.std(axis=1, ddof=0)
-    for name in BASE_METHODS:
+    for name in base_methods:
         out[f"{name}_minus_point_f"] = pd.to_numeric(out.get(f"{name}_predicted_high_f"), errors="coerce") - point
     for name in providers:
         out[f"{name}_minus_point_f"] = pd.to_numeric(out.get(f"{name}_high_f"), errors="coerce") - point
@@ -605,6 +667,7 @@ def fit_probability_system(
         "point_model_version": point_model_version,
         "point_bundle_sha256": point_bundle_sha256.lower(),
         "feature_profile": resolved_profile,
+        "base_methods": list(probability_base_methods(resolved_profile)),
         "feature_names": feature_names,
         "mandatory_source_features": list(
             probability_mandatory_feature_names(resolved_profile)
@@ -1235,7 +1298,9 @@ def predict_probability_bundle(bundle: Mapping[str, Any], feature_values: Mappin
         for name in bundle["mandatory_source_features"]
         if _finite_number(feature_values.get(name)) is None
     ]
-    for name in ("point_prediction_f", *[f"{method}_predicted_high_f" for method in BASE_METHODS]):
+    feature_profile = str(bundle.get("feature_profile", FEATURE_PROFILE_COMMON_NO_PEAK))
+    base_methods = tuple(bundle.get("base_methods") or probability_base_methods(feature_profile))
+    for name in ("point_prediction_f", *[f"{method}_predicted_high_f" for method in base_methods]):
         if _finite_number(feature_values.get(name)) is None:
             missing.append(name)
     if missing:
@@ -1243,13 +1308,9 @@ def predict_probability_bundle(bundle: Mapping[str, Any], feature_values: Mappin
     frame = add_probability_features(
         pd.DataFrame([dict(feature_values)]),
         providers=probability_provider_names(
-            str(
-                bundle.get(
-                    "feature_profile",
-                    FEATURE_PROFILE_COMMON_NO_PEAK,
-                )
-            )
+            feature_profile
         ),
+        base_methods=base_methods,
     )
     for name in bundle["feature_names"]:
         if name.endswith(MISSING_INDICATOR_SUFFIX):
@@ -1499,6 +1560,9 @@ def export_probability_bundle(
         "point_model_version": bundle["point_model_version"],
         "point_bundle_sha256": bundle["point_bundle_sha256"],
         "feature_profile": bundle["feature_profile"],
+        "base_methods": bundle.get(
+            "base_methods", probability_base_methods(str(bundle["feature_profile"]))
+        ),
         "feature_names": bundle["feature_names"],
         "mandatory_source_features": bundle["mandatory_source_features"],
         "offset_labels": bundle["offset_labels"],

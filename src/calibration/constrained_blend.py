@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Mapping
+from itertools import combinations
 
 import numpy as np
 import pandas as pd
@@ -105,8 +106,22 @@ def scan_three_model_simplex_weights(
 ) -> pd.DataFrame:
     if len(methods) != 3 or len(set(methods)) != 3:
         raise ValueError("Three distinct model methods are required.")
+    return scan_simplex_weights(frame, methods=methods, grid_step=grid_step)
+
+
+def scan_simplex_weights(
+    frame: pd.DataFrame,
+    *,
+    methods: tuple[str, ...],
+    grid_step: float = 0.025,
+) -> pd.DataFrame:
+    """Evaluate every non-negative grid point on an N-model simplex."""
+    if len(methods) < 2 or len(set(methods)) != len(methods):
+        raise ValueError("At least two distinct model methods are required.")
+    if not 0.0 < grid_step <= 1.0:
+        raise ValueError("grid_step must be in (0, 1].")
     units = int(round(1.0 / grid_step))
-    if not 0.0 < grid_step <= 1.0 or not np.isclose(units * grid_step, 1.0):
+    if not np.isclose(units * grid_step, 1.0):
         raise ValueError("grid_step must divide one exactly.")
     prediction_columns = [_prediction_column(method) for method in methods]
     required = [TARGET, "fold", *prediction_columns]
@@ -120,29 +135,61 @@ def scan_three_model_simplex_weights(
     predictions = clean.loc[:, prediction_columns].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
     fold_indices = [np.asarray(index, dtype=int) for index in clean.groupby("fold", sort=True).indices.values()]
     rows: list[dict[str, float | int]] = []
-    for first_units in range(units + 1):
-        for second_units in range(units - first_units + 1):
-            third_units = units - first_units - second_units
-            weights = np.asarray(
-                [first_units / units, second_units / units, third_units / units],
-                dtype=float,
-            )
-            predicted = predictions @ weights
-            absolute_error = np.abs(predicted - target)
-            fold_maes = [float(absolute_error[index].mean()) for index in fold_indices]
-            rows.append(
-                {
-                    f"{methods[0]}_weight": float(weights[0]),
-                    f"{methods[1]}_weight": float(weights[1]),
-                    f"{methods[2]}_weight": float(weights[2]),
-                    "mean_fold_mae_f": float(np.mean(fold_maes)),
-                    "worst_fold_mae_f": float(np.max(fold_maes)),
-                    "row_mae_f": float(absolute_error.mean()),
-                    "fold_count": len(fold_maes),
-                    "row_count": len(clean),
-                }
-            )
+    # Stars-and-bars enumerates integer weights deterministically and includes zero.
+    for bars in combinations(range(units + len(methods) - 1), len(methods) - 1):
+        boundaries = (-1, *bars, units + len(methods) - 1)
+        integer_weights = np.asarray(
+            [boundaries[index + 1] - boundaries[index] - 1 for index in range(len(methods))],
+            dtype=float,
+        )
+        weights = integer_weights / units
+        predicted = predictions @ weights
+        absolute_error = np.abs(predicted - target)
+        fold_maes = [float(absolute_error[index].mean()) for index in fold_indices]
+        rows.append(
+            {
+                **{
+                    f"{method}_weight": float(weight)
+                    for method, weight in zip(methods, weights, strict=True)
+                },
+                "mean_fold_mae_f": float(np.mean(fold_maes)),
+                "worst_fold_mae_f": float(np.max(fold_maes)),
+                "row_mae_f": float(absolute_error.mean()),
+                "fold_count": len(fold_maes),
+                "row_count": len(clean),
+            }
+        )
     return pd.DataFrame(rows)
+
+
+def select_simplex_weights(
+    scan: pd.DataFrame,
+    *,
+    methods: tuple[str, ...],
+    mean_mae_tolerance_f: float = 0.01,
+) -> pd.Series:
+    """Select a stable simplex point from the near-optimal mean-MAE set."""
+    if len(methods) < 2 or len(set(methods)) != len(methods):
+        raise ValueError("At least two distinct model methods are required.")
+    if mean_mae_tolerance_f < 0.0:
+        raise ValueError("mean_mae_tolerance_f must be non-negative.")
+    weight_columns = [f"{method}_weight" for method in methods]
+    required = [*weight_columns, "mean_fold_mae_f", "worst_fold_mae_f", "row_mae_f"]
+    missing = [column for column in required if column not in scan]
+    if missing or scan.empty:
+        raise ValueError(f"Simplex scan is empty or missing required columns: {missing}")
+    numeric_mean = pd.to_numeric(scan["mean_fold_mae_f"], errors="coerce")
+    best_mean = float(numeric_mean.min())
+    shortlist = scan.loc[numeric_mean.le(best_mean + mean_mae_tolerance_f + 1e-12)].copy()
+    equal_weight = 1.0 / len(methods)
+    shortlist["distance_from_equal"] = sum(
+        (pd.to_numeric(shortlist[column], errors="coerce") - equal_weight).abs()
+        for column in weight_columns
+    )
+    return shortlist.sort_values(
+        ["worst_fold_mae_f", "distance_from_equal", *weight_columns],
+        kind="stable",
+    ).iloc[0]
 
 
 def select_three_model_simplex_weights(

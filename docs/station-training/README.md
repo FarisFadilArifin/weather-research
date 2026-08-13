@@ -18,6 +18,7 @@ per station. Do not add multiple stations to one notebook.
 | Full pipeline, Celsius/Fahrenheit, bucket, and 3% missingness guide | `TEMPERATURE_UNITS_AND_BUCKETS.md` |
 | Ordinal Model 2 contract | `ORDINAL_MODEL_2.md` |
 | Immutable release provenance gate | `RELEASE_PROVENANCE.md` |
+| KDAL/Tokyo research-production parity audit (2026-08-11) | `KDAL_TOKYO_RESEARCH_PRODUCTION_PARITY_AUDIT_2026-08-11.md` |
 | Notebook generator | `generate_station_notebook.py` |
 
 KDAL is the reference implementation for the Dallas probability challenger.

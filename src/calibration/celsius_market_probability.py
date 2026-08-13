@@ -12,12 +12,12 @@ import numpy as np
 import pandas as pd
 
 from .bucket_probability import (
-    BASE_METHODS,
     FEATURE_PROFILE_PEAK_AUGMENTED,
     MISSING_INDICATOR_SUFFIX,
     add_probability_features,
     build_probability_frame,
     probability_feature_names,
+    probability_base_methods,
     probability_mandatory_feature_names,
     probability_provider_names,
 )
@@ -683,6 +683,7 @@ def fit_celsius_probability_system(
         "point_model_version": point_model_version,
         "point_bundle_sha256": point_bundle_sha256.lower(),
         "feature_profile": feature_profile,
+        "base_methods": list(probability_base_methods(feature_profile)),
         "feature_names": feature_names,
         "mandatory_source_features": list(probability_mandatory_feature_names(feature_profile)),
         "selected_family": MODEL_FAMILY,
@@ -733,9 +734,13 @@ def predict_celsius_probability_bundle(
         for name in bundle["mandatory_source_features"]
         if _finite_number(feature_values.get(name)) is None
     ]
+    base_methods = tuple(
+        bundle.get("base_methods")
+        or probability_base_methods(str(bundle["feature_profile"]))
+    )
     for name in (
         "point_prediction_f",
-        *(f"{method}_predicted_high_f" for method in BASE_METHODS),
+        *(f"{method}_predicted_high_f" for method in base_methods),
     ):
         if _finite_number(feature_values.get(name)) is None:
             missing.append(name)
@@ -747,6 +752,7 @@ def predict_celsius_probability_bundle(
     frame = add_probability_features(
         pd.DataFrame([dict(feature_values)]),
         providers=probability_provider_names(str(bundle["feature_profile"])),
+        base_methods=base_methods,
     )
     for name in bundle["feature_names"]:
         if name.endswith(MISSING_INDICATOR_SUFFIX):
@@ -870,6 +876,10 @@ def export_celsius_probability_bundle(
             "holdout_status",
         )
     }
+    manifest["base_methods"] = list(
+        bundle.get("base_methods")
+        or probability_base_methods(str(bundle["feature_profile"]))
+    )
     manifest["holdout_metrics"] = dict(bundle.get("holdout_metrics", {}))
     manifest["source_identity"] = dict(source_identity)
     manifest["artifact_integrity"] = {

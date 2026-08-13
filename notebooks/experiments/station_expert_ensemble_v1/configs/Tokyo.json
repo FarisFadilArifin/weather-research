@@ -1,0 +1,16 @@
+{
+  "station_id": "RJTT",
+  "city": "Tokyo",
+  "artifact_subdir": "Tokyo",
+  "feature_artifact_subdir": "Tokyo",
+  "feature_filename": "RJTT_features.csv",
+  "providers": ["gfs", "gefs", "jma_msm"],
+  "evaluation_years": [2022, 2023, 2024, 2025],
+  "probability_development_years": [2024, 2025],
+  "probability_forward_years": [2025],
+  "probability_profile": "expert_ensemble_asia_no_peak",
+  "probability_target": "celsius_1c",
+  "bucket_contract": "polymarket_half_up_1c",
+  "notebook": "train_Tokyo_expert_ensemble_v1.ipynb",
+  "kdal_challenger": false
+}

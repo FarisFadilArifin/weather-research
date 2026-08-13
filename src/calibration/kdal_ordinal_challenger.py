@@ -13,9 +13,7 @@ import pandas as pd
 
 from .bucket_probability import (
     ARTIFACT_TYPE,
-    BASE_METHODS,
     FEATURE_PROFILE_COMMON_NO_PEAK,
-    MANDATORY_SOURCE_FEATURES,
     OFFSET_LABELS,
     CandidateSpec,
     _fit_candidate,
@@ -29,6 +27,8 @@ from .bucket_probability import (
     fit_tail_policy,
     normalize_probabilities,
     probability_feature_names,
+    probability_base_methods,
+    probability_mandatory_feature_names,
     score_probabilities,
     temperature_scale,
 )
@@ -63,26 +63,25 @@ class ChallengerConfig:
     prior_strength: float
 
 
-def feature_sets() -> dict[str, list[str]]:
+def feature_sets(
+    feature_profile: str = FEATURE_PROFILE_COMMON_NO_PEAK,
+) -> dict[str, list[str]]:
     full = probability_feature_names(
         include_peak_features=False,
-        feature_profile=FEATURE_PROFILE_COMMON_NO_PEAK,
+        feature_profile=feature_profile,
     )
+    base_methods = probability_base_methods(feature_profile)
     compact = [
         "point_prediction_f",
         "rounded_point_degree_f",
         "point_rounding_remainder_f",
         "point_distance_to_round_boundary_f",
         "point_signed_distance_to_round_boundary_f",
-        "xgboost_predicted_high_f",
-        "lightgbm_predicted_high_f",
-        "catboost_predicted_high_f",
+        *(f"{method}_predicted_high_f" for method in base_methods),
         "base_prediction_mean_f",
         "base_prediction_spread_f",
         "base_prediction_std_f",
-        "xgboost_minus_point_f",
-        "lightgbm_minus_point_f",
-        "catboost_minus_point_f",
+        *(f"{method}_minus_point_f" for method in base_methods),
         "gfs_minus_point_f",
         "hrrr_minus_point_f",
         "nbm_minus_point_f",
@@ -122,8 +121,8 @@ def feature_sets() -> dict[str, list[str]]:
     ]
     return {
         "market_core_21": market_core,
-        "compact_27": compact,
-        "full_59": full,
+        f"compact_{len(compact)}": compact,
+        f"full_{len(full)}": full,
     }
 
 
@@ -310,8 +309,9 @@ def tune_candidates(
     valid: pd.DataFrame,
     *,
     random_state: int = 42,
+    feature_profile: str = FEATURE_PROFILE_COMMON_NO_PEAK,
 ) -> pd.DataFrame:
-    sets = feature_sets()
+    sets = feature_sets(feature_profile)
     tail_policy = fit_tail_policy(train["exact_offset"].astype(int))
     rows: list[dict[str, Any]] = []
     for prior_strength in PRIOR_STRENGTHS:
@@ -425,11 +425,12 @@ def fit_and_predict(
     config: ChallengerConfig,
     *,
     random_state: int = 42,
+    feature_profile: str = FEATURE_PROFILE_COMMON_NO_PEAK,
 ) -> tuple[dict[str, Any], pd.DataFrame, dict[str, Any]]:
     features = (
         []
         if config.family == "empirical"
-        else feature_sets()[config.feature_set]
+        else feature_sets(feature_profile)[config.feature_set]
     )
     model_state, probabilities = _model_probabilities(
         train,
@@ -564,6 +565,7 @@ def nested_forward_evaluation(
     development: pd.DataFrame,
     *,
     random_state: int = 42,
+    feature_profile: str = FEATURE_PROFILE_COMMON_NO_PEAK,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     development = development.loc[
         development["year"].between(2023, 2025)
@@ -580,7 +582,10 @@ def nested_forward_evaluation(
         ].copy()
         inner_train, inner_valid = _inner_split(outer_train)
         tuning = tune_candidates(
-            inner_train, inner_valid, random_state=random_state
+            inner_train,
+            inner_valid,
+            random_state=random_state,
+            feature_profile=feature_profile,
         )
         tuning["outer_validation_year"] = validation_year
         tuning_frames.append(tuning)
@@ -590,6 +595,7 @@ def nested_forward_evaluation(
             inner_valid,
             selected_config,
             random_state=random_state,
+            feature_profile=feature_profile,
         )
         policy = tune_no_override_policy(inner_predictions)
         outer_metrics, outer_predictions, _ = fit_and_predict(
@@ -597,6 +603,7 @@ def nested_forward_evaluation(
             outer_valid,
             selected_config,
             random_state=random_state,
+            feature_profile=feature_profile,
         )
         outer_predictions = apply_no_override_policy(
             outer_predictions, policy
@@ -692,6 +699,7 @@ def export_frozen_candidate(
     policy: Mapping[str, Any],
     historical_metrics: Mapping[str, Any],
     candidate_name: str,
+    feature_profile: str = FEATURE_PROFILE_COMMON_NO_PEAK,
 ) -> tuple[Path, Path]:
     import joblib
 
@@ -704,9 +712,12 @@ def export_frozen_candidate(
         "model_version": candidate_name,
         "point_model_version": point_model_version,
         "point_bundle_sha256": sha256_file(point_bundle_path),
-        "feature_profile": FEATURE_PROFILE_COMMON_NO_PEAK,
+        "feature_profile": feature_profile,
+        "base_methods": list(probability_base_methods(feature_profile)),
         "feature_names": list(state["feature_names"]),
-        "mandatory_source_features": list(MANDATORY_SOURCE_FEATURES),
+        "mandatory_source_features": list(
+            probability_mandatory_feature_names(feature_profile)
+        ),
         "offset_labels": list(OFFSET_LABELS),
         "selected_family": config.family,
         "selected_params": {

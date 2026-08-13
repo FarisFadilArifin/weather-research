@@ -11,6 +11,7 @@ from src.calibration.bucket_probability import (
     _predict_candidate,
     fit_tail_policy,
     predict_probability_bundle,
+    FEATURE_PROFILE_EXPERT_ENSEMBLE_COMMON_NO_PEAK,
 )
 from src.calibration.kdal_ordinal_challenger import (
     FROZEN_CANDIDATE_ROLES,
@@ -93,6 +94,16 @@ def test_feature_ablations_are_strict_subsets_of_full_contract() -> None:
     assert len(sets["full_59"]) == 59
     assert set(sets["market_core_21"]).issubset(sets["full_59"])
     assert set(sets["compact_27"]).issubset(sets["full_59"])
+
+
+def test_expert_ensemble_feature_ablations_are_21_29_61() -> None:
+    sets = feature_sets(FEATURE_PROFILE_EXPERT_ENSEMBLE_COMMON_NO_PEAK)
+    assert tuple(sets) == ("market_core_21", "compact_29", "full_61")
+    assert len(sets["market_core_21"]) == 21
+    assert len(sets["compact_29"]) == 29
+    assert len(sets["full_61"]) == 61
+    assert set(sets["market_core_21"]).issubset(sets["full_61"])
+    assert set(sets["compact_29"]).issubset(sets["full_61"])
 
 
 def test_no_override_policy_never_changes_point_bucket() -> None:

@@ -36,7 +36,18 @@ Follow:
 
 - `docs/station-training/NOTEBOOK_STANDARD.md`
 - `docs/station-training/SOP.md`
+- `docs/station-training/TEMPERATURE_UNITS_AND_BUCKETS.md`
 - `docs/station-training/ORDINAL_MODEL_2.md`
+
+`TEMPERATURE_UNITS_AND_BUCKETS.md` is required reading before changing or
+creating a station notebook, settlement target, Celsius/Fahrenheit conversion,
+market-bucket rule, point-bucket metric, feature-missingness gate, or final/live
+model refit. Follow its complete pipeline and acceptance checklist. In
+particular, declare the market bucket contract explicitly, preserve native
+settlement units when available, keep settlement fields out of model features,
+and recompute the configured 3% feature-missingness gate independently on every
+training fold and exact final-refit population. Never reuse an earlier eligible
+feature list for an all-data live refit.
 
 Keep point and probability chronology strictly forward. Fit preprocessing,
 selection, calibration, and policy thresholds inside the applicable training
@@ -66,6 +77,7 @@ For notebook or station-training changes:
 ```powershell
 python -m pytest tests\test_station_training_baseline.py
 python -m pytest tests\test_bucket_probability.py
+python -m pytest tests\test_temperature_buckets.py
 ```
 
 Also run the relevant experiment generator tests and model-export manifest

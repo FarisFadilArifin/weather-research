@@ -1,0 +1,16 @@
+{
+  "station_id": "KDAL",
+  "city": "Dallas",
+  "artifact_subdir": "KDAL",
+  "feature_artifact_subdir": "KDAL",
+  "feature_filename": "KDAL_features.csv",
+  "providers": ["gfs", "hrrr", "nbm"],
+  "evaluation_years": [2021, 2022, 2023, 2024, 2025],
+  "probability_development_years": [2023, 2024, 2025],
+  "probability_forward_years": [2024, 2025],
+  "probability_profile": "expert_ensemble_common_no_peak",
+  "probability_target": "fahrenheit_2f",
+  "bucket_contract": "polymarket_half_up_2f",
+  "notebook": "train_KDAL_expert_ensemble_v1.ipynb",
+  "kdal_challenger": true
+}
