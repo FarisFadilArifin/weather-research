@@ -112,6 +112,13 @@ def adopted_bundle(
     target_point_bundle_hash: str,
     adopted_model_version: str,
 ) -> dict[str, Any]:
+    if source["point_model_version"] != target_point_model_version or str(
+        source["point_bundle_sha256"]
+    ).lower() != target_point_bundle_hash.lower():
+        raise ValueError(
+            "metadata-only adoption requires the exact source point model; "
+            "recalibrate and validate the probability estimator for a different point release"
+        )
     output = copy.deepcopy(dict(source))
     original_thresholds = copy.deepcopy(source["decision_thresholds"])
     original_model_state = output["model_state"]

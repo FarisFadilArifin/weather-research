@@ -33,18 +33,34 @@ def test_adoption_changes_only_serving_identity_and_preserves_frozen_policy() ->
         source,
         source_bundle_hash="b" * 64,
         source_manifest_hash="c" * 64,
-        target_point_model_version="live-point",
-        target_point_bundle_hash="d" * 64,
+        target_point_model_version="evaluation-point",
+        target_point_bundle_hash="a" * 64,
         adopted_model_version="live-probability",
     )
 
     assert adopted["model_version"] == "live-probability"
-    assert adopted["point_model_version"] == "live-point"
-    assert adopted["point_bundle_sha256"] == "d" * 64
+    assert adopted["point_model_version"] == "evaluation-point"
+    assert adopted["point_bundle_sha256"] == "a" * 64
     assert adopted["decision_thresholds"] == source["decision_thresholds"]
     assert adopted["model_state"] == source["model_state"]
     assert adopted["serving_adoption"]["fitting_performed"] is False
     assert adopted["serving_adoption"]["threshold_selection_performed"] is False
+
+
+def test_adoption_rejects_different_point_release() -> None:
+    try:
+        module.adopted_bundle(
+            source_bundle(),
+            source_bundle_hash="b" * 64,
+            source_manifest_hash="c" * 64,
+            target_point_model_version="different-live-point",
+            target_point_bundle_hash="d" * 64,
+            adopted_model_version="live-probability",
+        )
+    except ValueError as error:
+        assert "exact source point model" in str(error)
+    else:
+        raise AssertionError("metadata-only point-model rebinding was allowed")
 
 
 def test_source_validation_rejects_holdout_trained_probability(tmp_path: Path) -> None:
