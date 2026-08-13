@@ -272,6 +272,21 @@ delete it or change the storage/study identity merely to obtain a fresh run.
 If the research question requires a new search, use a new experiment database
 and explain why the old parameters are not reusable.
 
+Seoul's August 1 database, `RKSI_optuna.sqlite3`, predates the Asia optional-field
+unit and physical-bounds correction and is historical evidence only. The active
+Seoul baseline intentionally uses:
+
+```text
+data/calibration/station_training_baseline/Seoul/
+  RKSI_optuna_unit_fix_2026.sqlite3
+```
+
+That database must be tuned from the patched feature frame. Do not copy studies
+from `RKSI_optuna.sqlite3` into it: although the encoded study names are the
+same, their objective values and best parameters were learned from the old
+feature values. Preserve the old database rather than deleting or overwriting
+it.
+
 ## 9. Enforce data, feature, and unit contracts
 
 Before training, write down and assert:

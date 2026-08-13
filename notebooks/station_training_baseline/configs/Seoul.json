@@ -7,7 +7,7 @@
   "notebook_path": "stations/Seoul/train_Seoul.ipynb",
   "artifact_subdir": "Seoul",
   "optuna_verbose": true,
-  "optuna_storage_name": "RKSI_optuna.sqlite3",
+  "optuna_storage_name": "RKSI_optuna_unit_fix_2026.sqlite3",
   "point_workflow_label": "Seoul V20 Asia no-peak aligned",
   "point_source_model_version": "station_high_regressor_v20_{CITY_ID}_no_peak_stack",
   "point_source_output_token": "DATA_ROOT / \"models\" / f\"v20_{CITY_ID}_no_peak\"",

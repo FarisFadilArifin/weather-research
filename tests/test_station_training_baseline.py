@@ -177,7 +177,7 @@ def test_seoul_and_tokyo_follow_station_baseline_contract() -> None:
             "model_version": "station_high_regressor_baseline_seoul_no_peak_stack",
             "evaluation_years": [2022, 2025],
             "live_model_version": "station_high_regressor_live_seoul_no_peak_stack_2026",
-            "optuna_storage_name": "RKSI_optuna.sqlite3",
+            "optuna_storage_name": "RKSI_optuna_unit_fix_2026.sqlite3",
         },
         "Tokyo": {
             "station_id": "RJTT",
