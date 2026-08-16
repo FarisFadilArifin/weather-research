@@ -266,6 +266,8 @@ def main() -> int:
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["serving_refit"] = probability_bundle["serving_refit"]
+    manifest["point_manifest_sha256"] = probability_bundle["point_manifest_sha256"]
+    manifest["training_input_identity"] = probability_bundle["training_input_identity"]
     manifest["historical_acceptance"] = probability_bundle["historical_acceptance"]
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
