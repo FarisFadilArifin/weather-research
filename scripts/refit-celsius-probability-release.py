@@ -174,13 +174,16 @@ def main() -> int:
     source_identity = clean_source_identity()
     point_bundle_path = args.point_bundle.resolve()
     point_manifest_path = args.point_manifest.resolve()
+    features_path = TOKYO_ROOT / "RJTT_features.csv"
+    base_oof_path = TOKYO_ROOT / "RJTT_year_split_validation_predictions.csv"
     point_hash = sha256_file(point_bundle_path)
+    point_manifest_hash = sha256_file(point_manifest_path)
     point_bundle = joblib.load(point_bundle_path)
     point_manifest = json.loads(point_manifest_path.read_text(encoding="utf-8"))
     validate_point_artifact(point_bundle, point_manifest, point_hash)
 
-    features = pd.read_csv(TOKYO_ROOT / "RJTT_features.csv", low_memory=False)
-    base_oof = pd.read_csv(TOKYO_ROOT / "RJTT_year_split_validation_predictions.csv")
+    features = pd.read_csv(features_path, low_memory=False)
+    base_oof = pd.read_csv(base_oof_path)
     honest_point = crossfit_ridge_predictions(base_oof, providers=PROVIDERS)
     training = build_celsius_probability_frame(
         features,
@@ -218,6 +221,13 @@ def main() -> int:
             "the point bundle was fitted through 2026-07-25; its 2026 replay is exploratory"
         ),
     }
+    probability_bundle["point_manifest_sha256"] = point_manifest_hash
+    probability_bundle["training_input_identity"] = {
+        "feature_frame_path": features_path.name,
+        "feature_frame_sha256": sha256_file(features_path),
+        "honest_point_predictions_path": base_oof_path.name,
+        "honest_point_predictions_sha256": sha256_file(base_oof_path),
+    }
     probability_bundle["historical_acceptance"] = {
         "passed": False,
         "reason": "economic_backtest_pending_and_2026_serving_point_replay_is_not_unseen",
@@ -244,6 +254,8 @@ def main() -> int:
         holdout_metrics_path,
         calibration_path,
         tuning_path,
+        features_path,
+        base_oof_path,
         point_manifest_path,
     ]
     bundle_path, manifest_path = export_celsius_probability_bundle(
@@ -261,6 +273,9 @@ def main() -> int:
     summary = {
         "point_model_version": point_bundle["model_version"],
         "point_bundle_sha256": point_hash,
+        "point_manifest_sha256": point_manifest_hash,
+        "feature_frame_sha256": sha256_file(features_path),
+        "honest_point_predictions_sha256": sha256_file(base_oof_path),
         "probability_model_version": args.model_version,
         "probability_bundle_sha256": sha256_file(bundle_path),
         "probability_manifest_sha256": sha256_file(manifest_path),

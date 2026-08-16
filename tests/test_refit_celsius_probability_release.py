@@ -72,3 +72,12 @@ def test_validate_point_artifact_requires_exact_hash() -> None:
         assert str(error) == "point bundle hash mismatch"
     else:
         raise AssertionError("mismatched point artifact was accepted")
+
+
+def test_sha256_file_is_stable_for_release_inputs(tmp_path: Path) -> None:
+    artifact = tmp_path / "input.csv"
+    artifact.write_bytes(b"contract_date,value\n2026-01-01,1\n")
+
+    assert MODULE.sha256_file(artifact) == (
+        "d4c975da24dd0d5b07bf96f08bc9bf479641807f052425a6e1cf24db130338d9"
+    )
