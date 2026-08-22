@@ -20,6 +20,7 @@ SPEC.loader.exec_module(MODULE)
 
 def feature_frame() -> pd.DataFrame:
     row = {name: 90.0 for name in MODULE.REQUIRED_FIELDS}
+    row.update({name: True for name in MODULE.REQUIRED_BOOLEAN_FIELDS})
     row.update(
         contract_date="2026-08-06",
         station_id="RKSI",
@@ -112,6 +113,7 @@ def test_payload_is_rksi_celsius_v20_target_free_and_atomic(tmp_path, monkeypatc
     assert payload["featureVersion"] == "v20_asia_no_peak"
     assert "actual_high_f" not in payload["featureInputs"]
     assert payload["featureInputs"]["optional_missing"] is None
+    assert payload["featureInputs"]["observed_precip_amount_available"] is True
 
     def fake_symlink(target, link, *, target_is_directory):
         link = Path(link)
@@ -136,6 +138,10 @@ def test_payload_is_rksi_celsius_v20_target_free_and_atomic(tmp_path, monkeypatc
         ("version", "feature_version_mismatch"),
         ("provider", "live_observation_source_contract_mismatch"),
         ("missing", "missing_required_live_features:gefs_high_f"),
+        (
+            "precip_availability_type",
+            "missing_required_live_features:observed_precip_amount_available",
+        ),
     ),
 )
 def test_payload_fails_closed_on_rksi_v20_contract_drift(mutation: str, error: str) -> None:
@@ -148,6 +154,8 @@ def test_payload_fails_closed_on_rksi_v20_contract_drift(mutation: str, error: s
         frame.loc[0, "feature_version"] = "v19"
     elif mutation == "provider":
         frame.loc[0, "observed_source"] = "aviation_weather_center_metar"
+    elif mutation == "precip_availability_type":
+        frame["observed_precip_amount_available"] = pd.Series([1.0], dtype=object)
     else:
         frame.loc[0, "gefs_high_f"] = float("nan")
     with pytest.raises(ValueError, match=error):

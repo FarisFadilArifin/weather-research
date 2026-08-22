@@ -49,8 +49,8 @@ REQUIRED_FIELDS = (
     "observed_humidity_at_as_of",
     "observed_visibility_at_as_of",
     "observed_precip_recent_at_as_of",
-    "observed_precip_amount_available",
 )
+REQUIRED_BOOLEAN_FIELDS = ("observed_precip_amount_available",)
 REQUIRED_TEXT_FIELDS = ("observed_weather_code_at_as_of",)
 WORKER_MANIFEST_SCHEMA_VERSION = 1
 EXPECTED_WORKER_RUNTIME_PAYLOADS = (
@@ -285,6 +285,11 @@ def build_payload(
         if not isinstance(inputs.get(name), (int, float))
         or isinstance(inputs.get(name), bool)
         or not math.isfinite(float(inputs[name]))
+    ]
+    missing += [
+        name
+        for name in REQUIRED_BOOLEAN_FIELDS
+        if not isinstance(inputs.get(name), bool)
     ]
     missing += [
         name
