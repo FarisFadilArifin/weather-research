@@ -127,6 +127,24 @@ def _atomic_write_frame(path: Path, frame: pd.DataFrame) -> None:
     os.replace(temporary, path)
 
 
+def _merge_normalized_month(
+    path: Path,
+    frame: pd.DataFrame,
+    *,
+    keys: Sequence[str],
+) -> pd.DataFrame:
+    """Merge an incremental slice into an existing normalized month."""
+    parts = [frame]
+    if path.exists():
+        parts.insert(0, pd.read_parquet(path))
+    merged = pd.concat(parts, ignore_index=True)
+    present_keys = [key for key in keys if key in merged.columns]
+    if present_keys:
+        merged = merged.drop_duplicates(present_keys, keep="last")
+        merged = merged.sort_values(present_keys)
+    return merged.reset_index(drop=True)
+
+
 def _sha256_bytes(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
@@ -208,6 +226,17 @@ class AsiaCityProfile:
 
 
 CITY_PROFILES: dict[str, AsiaCityProfile] = {
+    "busan": AsiaCityProfile(
+        city_id="busan",
+        city_name="Busan",
+        station_id="RKPK",
+        station_name="Gimhae International Airport",
+        latitude=35.1795,
+        longitude=128.9382,
+        elevation_m=2.0,
+        timezone="Asia/Seoul",
+        wunderground_country="KR",
+    ),
     "seoul": AsiaCityProfile(
         city_id="seoul",
         city_name="Seoul",
@@ -323,6 +352,7 @@ def run_settlement_backfill(
     *,
     api_key: str | None = None,
     force: bool = False,
+    workers: int = 4,
 ) -> dict[str, Any]:
     from .wunderground_history import backfill_wunderground_station_history
 
@@ -335,10 +365,12 @@ def run_settlement_backfill(
             profile.station_id: profile.wunderground_country for profile in profiles
         },
         station_units={profile.station_id: profile.wunderground_units for profile in profiles},
+        station_slugs={profile.station_id: profile.city_id for profile in profiles},
         start_date=start_date.isoformat(),
         end_date=end_date.isoformat(),
         api_key=api_key,
         force_refresh=force,
+        workers=max(1, int(workers)),
     )
     requested = set(day.isoformat() for day in target_dates(start_date, end_date))
     results: list[dict[str, Any]] = []
@@ -360,6 +392,7 @@ def run_settlement_backfill(
                 / profile.city_id
                 / f"{month_key}.parquet"
             )
+            part = _merge_normalized_month(path, part, keys=("contract_date",))
             _atomic_write_frame(path, part)
             ok = part["quality_flag"].astype(str).eq("ok") if not part.empty else pd.Series(dtype=bool)
             manifest = {
@@ -367,7 +400,7 @@ def run_settlement_backfill(
                 "station_id": profile.station_id,
                 "provider": "wunderground",
                 "month": month_key,
-                "status": "complete" if set(part["contract_date"].astype(str)) == expected else "incomplete",
+                "status": "complete" if expected.issubset(set(part["contract_date"].astype(str))) else "incomplete",
                 "requested_start": month_start,
                 "requested_end": month_end,
                 "row_count": len(part),
@@ -609,6 +642,7 @@ def backfill_observation_month(
     )
     frame["source_uri"] = response.url
     frame["source_checksum"] = _sha256_bytes(content)
+    frame = _merge_normalized_month(normalized_path, frame, keys=("contract_date",))
     _atomic_write_frame(normalized_path, frame)
     ok_count = int(frame["observed_fetch_status"].astype(str).eq("ok").sum())
     manifest = {
@@ -616,7 +650,13 @@ def backfill_observation_month(
         "station_id": profile.station_id,
         "provider": "iem",
         "month": month_key,
-        "status": "complete" if len(frame) == len(target_dates(start, end)) else "incomplete",
+        "status": (
+            "complete"
+            if {day.isoformat() for day in target_dates(start, end)}.issubset(
+                set(frame["contract_date"].astype(str))
+            )
+            else "incomplete"
+        ),
         "requested_start": start,
         "requested_end": end,
         "row_count": len(frame),
@@ -1464,8 +1504,15 @@ def backfill_jma_month(
         source_url=response.url,
         source_checksum=_sha256_bytes(content),
     )
+    frame = _merge_normalized_month(
+        path,
+        frame,
+        keys=("contract_date", "valid_time_utc"),
+    )
     _atomic_write_frame(path, frame)
-    expected_rows = len(target_dates(start, end)) * 13
+    requested_dates = {day.isoformat() for day in target_dates(start, end)}
+    requested_frame = frame.loc[frame["contract_date"].astype(str).isin(requested_dates)]
+    expected_rows = len(requested_dates) * 13
     ok_count = int(frame.get("fetch_status", pd.Series(dtype=str)).astype(str).eq("ok").sum())
     manifest = {
         "city_id": profile.city_id,
@@ -1473,7 +1520,7 @@ def backfill_jma_month(
         "provider": "jma_msm",
         "lineage": "jma_msm_previous_day1",
         "month": month_key,
-        "status": "complete" if len(frame) == expected_rows else "incomplete",
+        "status": "complete" if len(requested_frame) == expected_rows else "incomplete",
         "requested_start": start,
         "requested_end": end,
         "expected_rows": expected_rows,
@@ -1704,6 +1751,7 @@ def run_historical_pull(
         end_date,
         api_key=api_key,
         force=force,
+        workers=workers,
     )
     results["observations"] = run_observation_backfill(
         data_root,
@@ -1992,11 +2040,7 @@ def _compact_forecast_months(
                 / profile.city_id
                 / month_key
             )
-            frames = [
-                pd.read_parquet(path)
-                for path in sorted(day_dir.glob("*.parquet"))
-                if path.stem in {day.isoformat() for day in expected_days}
-            ]
+            frames = [pd.read_parquet(path) for path in sorted(day_dir.glob("*.parquet"))]
             frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
             output = day_dir.parent / f"{month_key}.parquet"
             _atomic_write_frame(output, frame)
@@ -2011,8 +2055,7 @@ def _compact_forecast_months(
                 .eq("ok")
             )
             complete = (
-                len(counts) == len(expected_days)
-                and all(
+                all(
                     int(counts.get(day.isoformat(), 0)) == expected_rows_per_day
                     for day in expected_days
                 )

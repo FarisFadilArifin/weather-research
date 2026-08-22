@@ -8,6 +8,7 @@ Project documentation is organized by purpose:
 | Architecture and project assumptions | [Project context](architecture/PROJECT_CONTEXT.md) |
 | Data and feature contracts | [Data documentation](data/) |
 | Tokyo 11 AM live data alignment | [Forecast and METAR contract](data/TOKYO_11AM_LIVE_ALIGNMENT.md) |
+| Seoul/Incheon 11 AM live worker | [RKSI feature and archive contract](data/SEOUL_11AM_LIVE_ALIGNMENT.md) |
 | Modeling and calibration | [Modeling documentation](modeling/) |
 | Notebook catalog | [Notebook index](notebooks/README.md) |
 | Station training standard and SOP | [Station training](station-training/README.md) |

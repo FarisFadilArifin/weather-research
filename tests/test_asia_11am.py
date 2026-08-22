@@ -24,6 +24,8 @@ from src.asia_11am import (
 
 
 def test_asia_profiles_and_local_cutoff() -> None:
+    assert CITY_PROFILES["busan"].station_id == "RKPK"
+    assert CITY_PROFILES["busan"].timezone == "Asia/Seoul"
     assert CITY_PROFILES["seoul"].station_id == "RKSI"
     assert CITY_PROFILES["tokyo"].station_id == "RJTT"
     timing = forecast_timing("2022-07-03")

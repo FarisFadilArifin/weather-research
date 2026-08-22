@@ -62,3 +62,39 @@ def test_station_history_http_error_does_not_expose_api_key(monkeypatch):
             "RJTT", "2026-08-01", "2026-08-01", country="JP", units="m"
         )
     assert "do-not-print" not in str(caught.value)
+
+
+def test_html_daily_observations_fallback_preserves_native_celsius(monkeypatch, tmp_path):
+    html = "".join(
+        f'<td class="temp">{value} °C</td>'
+        for value in [28, 29, 30, 31, 32, 33, 32, 31, 30, 29, 28, 27]
+    )
+
+    def fail_api(*args, **kwargs):
+        raise RuntimeError("Weather Company station history returned HTTP 401")
+
+    class PageResponse:
+        ok = True
+        status_code = 200
+        text = html
+
+    monkeypatch.setattr(module.WeatherCompanyStationHistoryClient, "fetch_observations", fail_api)
+    monkeypatch.setattr(module.requests, "get", lambda *args, **kwargs: PageResponse())
+
+    frame = module.backfill_wunderground_station_history(
+        tmp_path / "settlements.csv",
+        stations=["RKPK"],
+        station_timezones={"RKPK": "Asia/Seoul"},
+        station_countries={"RKPK": "KR"},
+        station_units={"RKPK": "m"},
+        station_slugs={"RKPK": "busan"},
+        start_date="2026-08-01",
+        end_date="2026-08-01",
+        api_key="test-public-key",
+    )
+
+    row = frame.iloc[0]
+    assert row["quality_flag"] == "ok"
+    assert row["settlement_high_c"] == pytest.approx(33.0)
+    assert "/history/daily/kr/busan/RKPK/date/2026-08-01" in row["source_url"]
+    assert "source=html_daily_observations" in row["notes"]

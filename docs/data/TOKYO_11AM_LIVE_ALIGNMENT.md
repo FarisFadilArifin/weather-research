@@ -284,4 +284,4 @@ Before enabling Tokyo live predictions:
 - Observation timestamp selection: `src/current_observations.py`
 - Tokyo provider feature aggregation: `src/calibration/asia_station_stacking.py`
 - Active station configuration:
-  `notebooks/station_training_baseline/configs/Tokyo.json`
+  `notebooks/station_training_baseline/configs/RJTT.json`

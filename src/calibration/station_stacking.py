@@ -4,6 +4,7 @@ import math
 import os
 from importlib.util import find_spec
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
@@ -851,6 +852,8 @@ class StationStackingConfig:
     observation_target_same_station: bool = True
     observation_source: str = "default"
     prebuilt_features: pd.DataFrame | None = None
+    nested_chronological_oos: bool = False
+    optuna_study_suffix: str = ""
 
     def resolved_project_root(self) -> Path:
         return Path(self.project_root).resolve()
@@ -1779,6 +1782,8 @@ def tune_year_split_base_models(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     if frame.empty:
         return pd.DataFrame(), _empty_year_split_predictions(), pd.DataFrame()
+    if config.nested_chronological_oos:
+        return _nested_chronological_year_split_base_models(frame, config, categorical, numeric, folds)
     frame = _ensure_model_target_columns(
         _add_configured_quality_flags(_with_actual_quality_columns(frame, config), config),
         config,
@@ -1948,6 +1953,121 @@ def tune_year_split_base_models(
     return tuning, validation_predictions, selected
 
 
+def _nested_chronological_year_split_base_models(
+    frame: pd.DataFrame, config: StationStackingConfig, categorical: list[str], numeric: list[str],
+    folds: tuple[YearSplitFold, ...],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Fit each outer fold from strictly prior, separately persisted inner studies."""
+    year = pd.to_numeric(frame.get("year"), errors="coerce")
+    tuning_rows: list[dict[str, Any]] = []
+    predictions: list[pd.DataFrame] = []
+    selections: list[dict[str, Any]] = []
+    for outer in sorted(folds, key=lambda value: value.validation_year):
+        inner_folds = tuple(
+            fold for fold in folds if fold.validation_year < outer.validation_year
+            and fold.validation_year <= outer.train_end_year and fold.train_start_year >= outer.train_start_year
+        )
+        if not inner_folds:
+            if outer != min(folds, key=lambda value: value.validation_year):
+                raise ValueError(f"nested outer fold lacks usable prior inner folds: {outer.name}")
+            continue  # fail closed: no prior target history for tuning
+        train_outer = frame.loc[year.between(outer.train_start_year, outer.train_end_year)].copy()
+        valid_outer = frame.loc[year.eq(outer.validation_year)].copy()
+        if train_outer.empty or valid_outer.empty:
+            raise ValueError(f"nested outer fold missing train/validation rows: {outer.name}")
+        inner_signature = "_".join(
+            f"{fold.train_start_year}-{fold.train_end_year}-{fold.validation_year}"
+            for fold in inner_folds
+        )
+        inner_config = replace(
+            config,
+            nested_chronological_oos=False,
+            optuna_study_suffix=f"_nested_outer_{outer.validation_year}_inner_{inner_signature}",
+        )
+        for method in config.effective_base_model_methods:
+            study = _create_optuna_study(inner_config, method)
+            local_rows: list[dict[str, Any]] = []
+            def objective(trial: Any) -> float:
+                params = _suggest_hyperparameters(method, trial, inner_config)
+                param_key = f"nested_outer_{outer.validation_year}_trial_{trial.number}"
+                scores: list[tuple[YearSplitFold, float]] = []
+                rows: list[dict[str, Any]] = []
+                for inner in inner_folds:
+                    train = frame.loc[year.between(inner.train_start_year, inner.train_end_year)].copy()
+                    valid = frame.loc[year.eq(inner.validation_year)].copy()
+                    if train.empty or valid.empty:
+                        raise ValueError(f"nested inner fold missing train/validation rows: {inner.name}")
+                    predicted, metadata = _fit_predict_base_model(config=inner_config, categorical=categorical, numeric=numeric, method=method, params=params, train=train, valid=valid, early_stopping=True)
+                    pred = valid[["contract_date", TARGET]].copy()
+                    pred["method"], pred["predicted_high_f"] = method, predicted
+                    pred["evaluation_scope"] = "nested_inner_selection"
+                    metrics = _metric_row(_prediction_columns(pred))
+                    row = {"method": method, "trial_number": trial.number, "param_key": param_key, "fold": inner.name,
+                           "fold_weight": _year_split_fold_weight(inner, config), "mae_f": float(metrics["mae_f"]),
+                           "rmse_f": float(metrics["rmse_f"]), "bucket_log_loss": float(metrics["bucket_log_loss"]),
+                           "count": int(metrics["count"]), "fit_numeric_features": metadata["numeric_features"],
+                           "fit_categorical_features": metadata["categorical_features"], "status": "ok", "error": "",
+                           "selection_scope": "nested_inner_chronological", "outer_fold": outer.name,
+                           "outer_validation_year": outer.validation_year,
+                           "selection_max_validation_year": max(item.validation_year for item in inner_folds),
+                           "inner_fold_signature": inner_signature,
+                           **{f"param_{key}": value for key, value in params.items()}}
+                    rows.append(row); scores.append((inner, float(metrics[config.effective_optuna_metric])))
+                if not scores:
+                    return float("inf")
+                produced = {row["fold"] for row in rows}
+                expected = {fold.name for fold in inner_folds}
+                if produced != expected:
+                    raise ValueError(f"nested inner fold coverage mismatch: expected={sorted(expected)} produced={sorted(produced)}")
+                local_rows.extend(rows)
+                score = _weighted_fold_score(scores, config)
+                _set_trial_checkpoint_attrs(trial, method=method, param_key=param_key, params=params, rows=rows, fit_metadata=[], status="ok", error="", objective_value=score)
+                return score
+            remaining = _remaining_optuna_trials(study, config.effective_optuna_trials)
+            if remaining:
+                study.optimize(objective, n_trials=remaining, show_progress_bar=False, catch=(Exception,))
+            rows = _study_tuning_rows(study) or local_rows
+            invalid_rows = [
+                row for row in rows
+                if row.get("outer_fold") != outer.name
+                or int(row.get("outer_validation_year", -1)) != outer.validation_year
+                or row.get("inner_fold_signature") != inner_signature
+            ]
+            if invalid_rows:
+                raise ValueError(f"persisted nested study lineage mismatch for outer fold {outer.name}")
+            expected_fold_names = {fold.name for fold in inner_folds}
+            for param_key, trial_rows in pd.DataFrame(rows).groupby("param_key", dropna=False):
+                names = trial_rows["fold"].tolist()
+                if set(names) != expected_fold_names or len(names) != len(expected_fold_names):
+                    raise ValueError(
+                        f"persisted nested study fold coverage mismatch for outer fold {outer.name} param_key={param_key}"
+                    )
+            tuning_rows.extend(rows)
+            selected = _selected_hyperparameters(pd.DataFrame(rows), config.effective_optuna_metric)
+            if selected.empty:
+                raise ValueError(f"nested outer fold has no selectable parameters: method={method} fold={outer.name}")
+            selected_row = selected.iloc[0]
+            try:
+                predicted, metadata = _fit_predict_base_model(config=config, categorical=categorical, numeric=numeric, method=method, params=_params_from_selected_row(selected_row), train=train_outer, valid=valid_outer, early_stopping=False)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"nested outer fit failed for method={method} fold={outer.name}"
+                ) from exc
+            pred = valid_outer[["contract_date", TARGET]].copy()
+            pred["method"], pred["param_key"], pred["predicted_high_f"] = method, str(selected_row["param_key"]), predicted
+            pred["evaluation_scope"], pred["fold"] = "year_split_validation_nested_chronological", outer.name
+            predictions.append(_year_split_prediction_columns(pred))
+            record = selected_row.to_dict()
+            record.update({"selection_scope": "nested_inner_chronological", "outer_fold": outer.name,
+                           "outer_validation_year": outer.validation_year,
+                           "selection_max_validation_year": max(item.validation_year for item in inner_folds),
+                           "inner_fold_signature": inner_signature,
+                           "outer_fit_numeric_features": metadata["numeric_features"], "outer_fit_categorical_features": metadata["categorical_features"]})
+            selections.append(record)
+    selected_frame = pd.DataFrame(selections)
+    return pd.DataFrame(tuning_rows), (pd.concat(predictions, ignore_index=True) if predictions else _empty_year_split_predictions()), selected_frame
+
+
 def year_split_test_predictions(
     frame: pd.DataFrame,
     config: StationStackingConfig,
@@ -1995,6 +2115,9 @@ def year_split_test_predictions(
         pred["fold"] = f"train_{train_years[0]}_{train_years[1]}_test_{test_year}"
         rows.append(_year_split_prediction_columns(pred))
     selected = selected_hyperparameters.copy()
+    if "outer_validation_year" in selected:
+        selected = (selected.sort_values("outer_validation_year")
+                    .groupby("method", as_index=False, sort=False).tail(1).reset_index(drop=True))
     for _, row in selected.iterrows():
         method = str(row["method"])
         params = _params_from_selected_row(row)
@@ -2656,6 +2779,8 @@ def feature_columns(frame: pd.DataFrame, config: StationStackingConfig) -> tuple
         "actual_high_c",
         "settlement_high_c",
         "actual_high_c_source",
+        "actual_high_c_settlement_source",
+        "settlement_high_c_source",
         "target_source",
         "target_source_diff_f",
         "settlement_source",
@@ -5046,9 +5171,10 @@ def _optuna_study_name(config: StationStackingConfig, *, stage: str, method: str
         for character in str(config.observation_source or "default").lower()
     ).strip("_")
     observation_source_part = "" if observation_source in {"", "default"} else f"_obs_{observation_source}"
+    suffix = "".join(character if character.isalnum() or character == "_" else "_" for character in str(config.optuna_study_suffix or ""))
     return (
         f"{station}_{version}{target_part}{profile_part}_{stage}_{method}_{metric}"
-        f"{space_part}{observation_scope_part}{observation_source_part}"
+        f"{space_part}{observation_scope_part}{observation_source_part}{suffix}"
     )
 
 

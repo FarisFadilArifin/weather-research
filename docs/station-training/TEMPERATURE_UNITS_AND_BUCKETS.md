@@ -195,6 +195,8 @@ settlement_high_f
 actual_high_c
 settlement_high_c
 actual_high_c_source
+actual_high_c_settlement_source
+settlement_high_c_source
 settlement_source
 quality and target-source diagnostics
 ```
@@ -502,7 +504,8 @@ The live export must:
   frozen feature violates the gate;
 - never add newly eligible features during the refit;
 - record a new missingness audit and bundle hash;
-- remain disabled by default in the notebook; and
+- remain explicitly labeled as an unapproved production candidate even when
+  exported by default from the active notebook; and
 - never claim the already-inspected rows as fresh out-of-sample evidence.
 
 ## Phase 11: optionally train a market probability model

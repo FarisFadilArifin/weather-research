@@ -196,6 +196,8 @@ def test_asia_builder_converts_and_deduplicates_fixture(tmp_path: Path) -> None:
     assert frame.loc[frame["contract_date"].eq("2022-07-04"), "actual_high_f"].iloc[0] == 89.6
     assert frame.loc[frame["contract_date"].eq("2022-07-04"), "actual_high_c"].iloc[0] == 32.0
     assert frame["actual_high_c_source"].eq("settlement_high_c").all()
+    assert frame["actual_high_c_settlement_source"].eq("wunderground_station_history").all()
+    assert frame["settlement_high_c_source"].eq("wunderground_station_history").all()
     assert frame.loc[frame["contract_date"].eq("2022-07-03"), "gfs_high_f"].iloc[0] == 82.4
     assert frame.loc[frame["contract_date"].eq("2022-07-03"), "jma_msm_high_f"].iloc[0] == 82.4
     row = frame.loc[frame["contract_date"].eq("2022-07-03")].iloc[0]
@@ -263,6 +265,11 @@ def test_asia_point_model_excludes_final_same_day_iem_highs() -> None:
     frame = pd.DataFrame(
         {
             "actual_high_f": [86.0],
+            "actual_high_c": [30.0],
+            "settlement_high_c": [30.0],
+            "actual_high_c_source": ["settlement_high_c"],
+            "actual_high_c_settlement_source": ["wunderground_station_history"],
+            "settlement_high_c_source": ["wunderground_station_history"],
             "observed_high_temp_through_as_of_f": [80.0],
             "iem_daily_high_f": [86.0],
             "iem_daily_high_c": [30.0],
@@ -283,6 +290,9 @@ def test_asia_point_model_excludes_final_same_day_iem_highs() -> None:
     assert "observed_high_temp_through_as_of_f" in selected
     assert "actual_high_c" not in selected
     assert "settlement_high_c" not in selected
+    assert "actual_high_c_source" not in selected
+    assert "actual_high_c_settlement_source" not in selected
+    assert "settlement_high_c_source" not in selected
     assert selected.isdisjoint(POINT_IN_TIME_UNSAFE_FEATURE_COLUMNS)
 
 
