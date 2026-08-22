@@ -68,6 +68,7 @@ def provider_contract() -> dict[str, object]:
         "requiredRuntimeFields": [
             "observed_humidity_at_as_of",
             "observed_precip_recent_at_as_of",
+            "observed_precip_amount_available",
             "observed_visibility_at_as_of",
             "observed_weather_code_at_as_of",
         ],
@@ -199,4 +200,5 @@ def test_checked_in_provider_contract_is_rksi_iem_population() -> None:
     contract = MODULE.load_provider_contract(Path(__file__).resolve().parents[1])
     assert contract["contractId"] == "rksi_iem_asos_metar_training_population_v1"
     assert contract["trainingProvider"] == contract["runtimeProvider"] == "iem_asos_global_metar"
+    assert "observed_precip_amount_available" in contract["requiredRuntimeFields"]
     assert contract["weatherCodePolicy"]["clearWeatherSentinel"] == "NONE"

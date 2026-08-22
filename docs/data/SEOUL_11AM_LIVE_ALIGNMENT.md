@@ -35,7 +35,8 @@ Publication requires all of the following:
 - every provider has non-empty source URLs and a valid SHA-256 provenance
   checksum;
 - the v20 Asia provider-high, forecast-at-cutoff, current-observation,
-  humidity, visibility, precipitation, and weather-code inputs are present;
+  humidity, visibility, precipitation, precipitation-availability, and
+  weather-code inputs are present;
 - no settlement target is included in `featureInputs`;
 - the worker archive manifest exactly enumerates every runtime file and every
   file matches its recorded size and checksum;

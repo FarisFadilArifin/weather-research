@@ -9,6 +9,7 @@
   "requiredRuntimeFields": [
     "observed_humidity_at_as_of",
     "observed_precip_recent_at_as_of",
+    "observed_precip_amount_available",
     "observed_visibility_at_as_of",
     "observed_weather_code_at_as_of"
   ],

@@ -49,6 +49,7 @@ REQUIRED_FIELDS = (
     "observed_humidity_at_as_of",
     "observed_visibility_at_as_of",
     "observed_precip_recent_at_as_of",
+    "observed_precip_amount_available",
 )
 REQUIRED_TEXT_FIELDS = ("observed_weather_code_at_as_of",)
 WORKER_MANIFEST_SCHEMA_VERSION = 1
@@ -130,6 +131,7 @@ def load_provider_contract(project_root: Path) -> dict[str, Any]:
     expected = {
         "observed_humidity_at_as_of",
         "observed_precip_recent_at_as_of",
+        "observed_precip_amount_available",
         "observed_visibility_at_as_of",
         "observed_weather_code_at_as_of",
     }
