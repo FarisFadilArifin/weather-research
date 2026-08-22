@@ -123,7 +123,7 @@ Current production reference paths are:
 | Station | Active notebook | Point providers | Frozen live feature contract |
 | --- | --- | --- | ---: |
 | KDAL | `stations/KDAL/train_KDAL.ipynb` | GFS, HRRR, NBM | 198 ordered features |
-| RJTT | `stations/Tokyo/train_Tokyo.ipynb` | GFS, GEFS, JMA MSM | 293 ordered features |
+| RJTT | `stations/RJTT/train_RJTT.ipynb` | GFS, GEFS, JMA MSM | generator-selected XGBoost feature contract |
 
 Use KDAL as the reference for the Dallas-style two-Fahrenheit-degree pipeline.
 Use Tokyo or Seoul as the reference for the Asia local-11-AM, whole-Celsius
@@ -231,9 +231,10 @@ an implicit default:
 }
 ```
 
-The current point workflow uses separate named studies for XGBoost, LightGBM,
-CatBoost, and the Ridge stack. Study names also encode station, feature version,
-target mode, training profile, method, metric, and search-space identity. Do not
+The canonical baseline point workflow uses one named XGBoost study per station.
+Historical experiments may still contain separate LightGBM, CatBoost, and
+stack studies. Study names encode station, feature version, target mode,
+training profile, method, metric, and search-space identity. Do not
 reuse a database when any of those contracts change unless the study name also
 changes and the old studies remain unambiguous.
 
@@ -257,7 +258,7 @@ For the completed Tokyo/RJTT production-aligned tuning state, the canonical
 local path is:
 
 ```text
-data/calibration/station_training_baseline/Tokyo/
+data/calibration/station_training_baseline/RJTT/
   RJTT_optuna_no_fullday_high.sqlite3
 ```
 
@@ -358,14 +359,11 @@ live refit may use all completed eligible actuals, but it must:
 - use a distinct live model identity; and
 - avoid claiming the evaluation model's holdout metrics.
 
-Live export is disabled by default. It requires:
-
-```powershell
-$env:STATION_TRAINING_EXPORT_LIVE_MODEL_WEIGHTS = "1"
-```
-
-Do not set that variable for ordinary research runs. Exporting a live candidate
-does not authorize deployment.
+The canonical active station notebooks export a separately versioned
+live-production candidate by default. That artifact remains an unapproved
+candidate: automatic export does not authorize deployment, change runtime
+selection, or replace the separate clean-commit promotion review. Experiments
+must continue to isolate their artifacts from the active baseline.
 
 ## 12. Execute the experiment
 
@@ -449,7 +447,8 @@ change and full SOP validation.
       labeled separately.
 - [ ] Optuna storage is intact and existing completed studies are reused when
       the search contract is unchanged.
-- [ ] Live export remains disabled for research.
+- [ ] Any automatically exported production artifact is labeled as an
+      unapproved candidate and remains isolated from deployment.
 - [ ] Probability artifacts remain shadow-only without explicit promotion.
 - [ ] Notebook JSON parses, ordinary Python cells compile, and regeneration is
       deterministic at the source-cell level.
@@ -471,4 +470,4 @@ change and full SOP validation.
 | Convert humidity or wind as temperature | Corrupts Asia features | Convert only temperature/dewpoint dimensions |
 | Select features after imputation | Hides missingness | Gate raw/coerced fold-training values first |
 | Retune or calibrate on the holdout | Invalidates evidence | Keep the inspected period exploratory |
-| Enable live export during research | Produces a release-shaped artifact without approval | Leave the environment switch unset |
+| Treat an automatically exported production candidate as approved | Bypasses provenance and promotion review | Keep the candidate unapproved until the separate clean-commit review |

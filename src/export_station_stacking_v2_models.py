@@ -94,6 +94,12 @@ def export_station_model_weights(
     city_id: str | None = None,
     frozen_feature_names: tuple[str, ...] | list[str] | None = None,
     feature_contract_source: dict[str, Any] | None = None,
+    release_role: str = "unapproved_candidate",
+    approval_status: str = "unapproved_candidate",
+    year_split_folds: tuple[Any, ...] | None = None,
+    year_split_validation_weights: dict[int, float] | None = None,
+    year_split_test_train_years: tuple[int, int] = (2021, 2025),
+    year_split_test_year: int = 2026,
 ) -> ExportedModelWeights:
     root = Path(project_root).resolve()
     station = station_id.upper()
@@ -127,6 +133,10 @@ def export_station_model_weights(
         max_feature_missing_fraction=max_feature_missing_fraction,
         observation_target_same_station=observation_target_same_station,
         observation_source=observation_source,
+        year_split_folds=year_split_folds,
+        year_split_validation_weights=year_split_validation_weights,
+        year_split_test_train_years=year_split_test_train_years,
+        year_split_test_year=year_split_test_year,
     )
     modeling_frame, categorical, numeric = _modeling_frame(features, config)
     if modeling_frame.empty:
@@ -179,11 +189,20 @@ def export_station_model_weights(
 
     base_models: dict[str, Any] = {}
     base_model_manifests: list[dict[str, Any]] = []
+    selected_for_refit = selected
+    if "outer_validation_year" in selected_for_refit:
+        selected_for_refit = (selected_for_refit.sort_values("outer_validation_year")
+                              .groupby("method", as_index=False, sort=False).tail(1))
     selected_by_method = {
         str(row["method"]): row
-        for _, row in selected.iterrows()
+        for _, row in selected_for_refit.iterrows()
         if str(row.get("method", "")) in methods
     }
+    nested_selection_audit = (
+        selected.loc[selected.get("selection_scope", pd.Series("", index=selected.index)).eq("nested_inner_chronological")]
+        .to_dict(orient="records")
+        if "selection_scope" in selected else []
+    )
     missing_methods = [method for method in methods if method not in selected_by_method]
     if missing_methods:
         raise ValueError(f"{station} selected hyperparameters missing methods: {missing_methods}")
@@ -278,6 +297,8 @@ def export_station_model_weights(
         "bucket_probability_policy": bucket_probability_policy,
         "bucket_contract": normalized_bucket_contract,
         "residual_calibrator": residual_calibrator,
+        "release_role": release_role,
+        "approval_status": approval_status,
     }
 
     bundle_path = output_dir / f"{station}_{model_version}.joblib"
@@ -296,8 +317,10 @@ def export_station_model_weights(
         "city_id": city_id,
         "created_at_utc": datetime.now(UTC).isoformat(),
         "source_pipeline": source_pipeline,
-        "source_artifact_dir": str(artifacts),
-        "bundle_path": str(bundle_path),
+        "release_role": release_role,
+        "approval_status": approval_status,
+        "source_artifact_dir": _portable_path(root, artifacts),
+        "bundle_path": _portable_path(root, bundle_path),
         "artifact_integrity": {
             "bundle_sha256": bundle_sha256,
         },
@@ -345,11 +368,7 @@ def export_station_model_weights(
         },
         "training_validation": {
             "training_profile": config.effective_training_profile,
-            "base_fold_policy": (
-                "four_equal_weight_expanding_folds_2022_2025"
-                if config.effective_training_profile != TRAINING_PROFILE_LEGACY
-                else "configured_legacy_folds"
-            ),
+            "base_fold_policy": _base_fold_policy(config),
             "base_folds": [
                 {
                     "name": fold.name,
@@ -360,17 +379,15 @@ def export_station_model_weights(
                 }
                 for fold in config.effective_year_split_folds
             ],
-            "stack_validation_mode": (
-                "three_expanding_meta_folds_2023_2025"
-                if config.effective_training_profile != TRAINING_PROFILE_LEGACY
-                else "single_latest_meta_year"
-            ),
+            "stack_validation_mode": _stack_validation_mode(config, stack_enabled),
             "selected_ridge_trial": stack_manifest.get("param_key"),
             "selected_ridge_trial_number": stack_manifest.get("trial_number"),
             "stack_mean_selection_metric": stack_manifest.get("validation_mean_selection_metric"),
             "stack_worst_selection_metric": stack_manifest.get("validation_worst_selection_metric"),
             "stack_fold_count": stack_manifest.get("validation_fold_count", 0),
             "stack_selection_rule": stack_manifest.get("selection_rule"),
+            "nested_outer_selection_audit": _jsonable(nested_selection_audit),
+            "nested_refit_selection_rule": "latest_honest_outer_fold_per_method" if nested_selection_audit else None,
         },
         "features": {
             "categorical": fit_categorical,
@@ -422,6 +439,27 @@ def export_station_model_weights(
     }
     manifest_path.write_text(json.dumps(_jsonable(manifest), indent=2) + "\n", encoding="utf-8")
     return ExportedModelWeights(station_id=station, bundle_path=bundle_path, manifest_path=manifest_path)
+
+
+def _portable_path(project_root: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(project_root.resolve()).as_posix()
+    except ValueError:
+        return path.name
+
+
+def _base_fold_policy(config: StationStackingConfig) -> str:
+    folds = config.effective_year_split_folds
+    years = "_".join(str(fold.validation_year) for fold in folds)
+    weights = [_year_split_fold_weight(fold, config) for fold in folds]
+    weighting = "equal_weight" if len(set(weights)) == 1 else "configured_weights"
+    return f"{len(folds)}_chronological_folds_{years}_{weighting}"
+
+
+def _stack_validation_mode(config: StationStackingConfig, stack_enabled: bool) -> str:
+    if not stack_enabled:
+        return "disabled"
+    return "expanding_meta_validation" if config.effective_training_profile != TRAINING_PROFILE_LEGACY else "single_latest_meta_year"
 
 
 def export_all_station_model_weights(

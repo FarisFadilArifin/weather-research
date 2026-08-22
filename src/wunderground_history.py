@@ -4,6 +4,7 @@ import os
 import re
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -27,6 +28,23 @@ SETTLEMENT_COLUMNS = [
     "notes",
     "fetched_at_utc",
 ]
+
+WUNDERGROUND_HISTORY_PAGE = (
+    "https://www.wunderground.com/history/daily/"
+    "{country}/{city}/{station}/date/{day}"
+)
+_WUNDERGROUND_TEMP_CELL_RE = re.compile(
+    r'<td[^>]*class=["\'][^"\']*\btemp\b[^"\']*["\'][^>]*>\s*(.*?)\s*</td>',
+    re.IGNORECASE | re.DOTALL,
+)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+# Keep this pattern ASCII-safe: Wunderground may render the degree separator as
+# a literal symbol, an HTML entity, or a replacement glyph depending on the
+# response encoding.
+_TEMPERATURE_RE = re.compile(
+    r"([-+]?\d+(?:\.\d+)?)\s*(?:[^A-Za-z0-9\s]+\s*)?([CF])",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -87,12 +105,14 @@ def backfill_wunderground_station_history(
     station_timezones: dict[str, str],
     station_countries: dict[str, str] | None = None,
     station_units: dict[str, str] | None = None,
+    station_slugs: dict[str, str] | None = None,
     start_date: str,
     end_date: str,
     api_key: str | None = None,
     api_key_env: str = "WEATHER_COMPANY_API_KEY",
     sleep_seconds: float = 0.0,
     force_refresh: bool = False,
+    workers: int = 4,
 ) -> pd.DataFrame:
     wanted = sorted(
         {str(station).upper().strip() for station in stations if str(station).strip()}
@@ -107,6 +127,10 @@ def backfill_wunderground_station_history(
     units_by_station = {
         str(station).upper(): str(units).lower()
         for station, units in (station_units or {}).items()
+    }
+    slugs = {
+        str(station).upper(): str(slug).strip().lower()
+        for station, slug in (station_slugs or {}).items()
     }
     key = api_key or os.environ.get(api_key_env) or discover_weather_company_public_api_key()
     client = WeatherCompanyStationHistoryClient(api_key=key)
@@ -173,21 +197,23 @@ def backfill_wunderground_station_history(
                         )
                     )
             except Exception as exc:  # noqa: BLE001 - preserve unavailable dates.
-                for day in missing:
-                    row = _settlement_row(
-                        client,
-                        station,
-                        day,
-                        country,
-                        units,
-                        timezone,
-                        None,
-                        "unavailable",
-                        0,
-                        fetched_at,
-                    )
-                    row["notes"] = str(exc)
-                    rows.append(row)
+                # The Weather Company endpoint used by the public Wunderground
+                # page can return 401 even when the page itself is readable.
+                # Fall back to the exact Wunderground Daily Observations table,
+                # preserving the Polymarket settlement source and native unit.
+                page_rows = _fallback_wunderground_rows(
+                    client,
+                    station,
+                    missing,
+                    country=country,
+                    city=slugs.get(station, ""),
+                    units=units,
+                    timezone=timezone,
+                    fetched_at=fetched_at,
+                    api_error=str(exc),
+                    workers=workers,
+                )
+                rows.extend(page_rows)
             if sleep_seconds > 0:
                 time.sleep(sleep_seconds)
 
@@ -208,6 +234,9 @@ def _settlement_row(
     quality: str,
     count: int,
     fetched_at: str,
+    *,
+    source_url: str | None = None,
+    notes_extra: str | None = None,
 ) -> dict[str, Any]:
     return {
         "station_id": station,
@@ -216,14 +245,126 @@ def _settlement_row(
         "settlement_high_c": summary["high_c"] if summary and quality == "ok" else pd.NA,
         "settlement_unit": "C" if units == "m" else "F",
         "settlement_source": "wunderground_station_history",
-        "source_url": _station_history_source_url(client, station, day, day, country, units),
+        "source_url": source_url
+        or _station_history_source_url(client, station, day, day, country, units),
         "quality_flag": quality,
         "raw_value": summary["high_native"] if summary else pd.NA,
-        "notes": (
-            f"observation_count={count}; timezone={timezone}; country={country}; units={units}"
+        "notes": "; ".join(
+            part
+            for part in (
+                f"observation_count={count}",
+                f"timezone={timezone}",
+                f"country={country}",
+                f"units={units}",
+                notes_extra,
+            )
+            if part
         ),
         "fetched_at_utc": fetched_at,
     }
+
+
+def _fallback_wunderground_rows(
+    client: WeatherCompanyStationHistoryClient,
+    station: str,
+    days: list[str],
+    *,
+    country: str,
+    city: str,
+    units: str,
+    timezone: str,
+    fetched_at: str,
+    api_error: str,
+    workers: int,
+) -> list[dict[str, Any]]:
+    def fetch(day: str) -> dict[str, Any]:
+        try:
+            summary, source_url = _fetch_wunderground_page_daily_high(
+                station,
+                day,
+                country=country,
+                city=city,
+                units=units,
+            )
+            count = int(summary["observation_count"])
+            quality = "ok" if count >= 12 else "sparse_or_unavailable"
+            return _settlement_row(
+                client,
+                station,
+                day,
+                country,
+                units,
+                timezone,
+                summary if quality == "ok" else None,
+                quality,
+                count,
+                fetched_at,
+                source_url=source_url,
+                notes_extra="source=html_daily_observations; api_fallback=" + api_error,
+            )
+        except Exception as page_error:  # noqa: BLE001 - preserve unavailable dates.
+            row = _settlement_row(
+                client,
+                station,
+                day,
+                country,
+                units,
+                timezone,
+                None,
+                "unavailable",
+                0,
+                fetched_at,
+                notes_extra=f"api_error={api_error}; page_error={page_error}",
+            )
+            return row
+
+    if not city:
+        return [fetch(day) for day in days]
+    with ThreadPoolExecutor(max_workers=max(1, min(int(workers), len(days)))) as executor:
+        return list(executor.map(fetch, days))
+
+
+def _fetch_wunderground_page_daily_high(
+    station: str,
+    day: str,
+    *,
+    country: str,
+    city: str,
+    units: str,
+) -> tuple[dict[str, float | int], str]:
+    if not city:
+        raise ValueError(f"No Wunderground city slug configured for {station}")
+    source_url = WUNDERGROUND_HISTORY_PAGE.format(
+        country=country.lower(), city=city.lower(), station=station.upper(), day=day
+    )
+    response = requests.get(
+        source_url,
+        headers={"User-Agent": "Mozilla/5.0 weather-research settlement backfill"},
+        timeout=60,
+    )
+    if not response.ok:
+        raise RuntimeError(f"Wunderground history page returned HTTP {response.status_code}")
+    expected_unit = "C" if units == "m" else "F"
+    values: list[float] = []
+    for cell in _WUNDERGROUND_TEMP_CELL_RE.findall(response.text):
+        text = re.sub(r"\s+", " ", _HTML_TAG_RE.sub(" ", cell)).strip()
+        match = _TEMPERATURE_RE.search(text)
+        if match and match.group(2).upper() == expected_unit:
+            values.append(float(match.group(1)))
+    if not values:
+        raise ValueError(f"No {expected_unit} temperature rows found for {station} {day}")
+    high_native = max(values)
+    high_c = high_native if units == "m" else (high_native - 32) * 5 / 9
+    high_f = high_native * 9 / 5 + 32 if units == "m" else high_native
+    return (
+        {
+            "high_native": high_native,
+            "high_c": high_c,
+            "high_f": high_f,
+            "observation_count": len(values),
+        },
+        source_url,
+    )
 
 
 def _station_history_daily_highs(

@@ -1,94 +1,65 @@
 # Station Training Baseline
 
-This is the active, non-versioned station-training entry point. Use one notebook
-per station. Do not add multiple stations to one notebook.
+The canonical baseline is a generator-backed, station-code workflow for four
+stations. Each notebook trains exactly one XGBoost point model, keeps Gaussian
+as the probability benchmark, exports four ordinal research candidates, and
+evaluates a canonical three-member ordinal ensemble built from honest point
+predictions.
 
-## Start here
+| Station | Notebook | Config | Native market buckets |
+|---|---|---|---|
+| KDAL | `stations/KDAL/train_KDAL.ipynb` | `configs/KDAL.json` | 2°F |
+| RJTT | `stations/RJTT/train_RJTT.ipynb` | `configs/RJTT.json` | 1°C |
+| RKSI | `stations/RKSI/train_RKSI.ipynb` | `configs/RKSI.json` | 1°C |
+| RKPK | `stations/RKPK/train_RKPK.ipynb` | `configs/RKPK.json` | 1°C |
 
-| Purpose | Path |
-|---|---|
-| KDAL training notebook | `stations/KDAL/train_KDAL.ipynb` |
-| KDAL station configuration | `configs/KDAL.json` |
-| Seoul/RKSI training notebook | `stations/Seoul/train_Seoul.ipynb` |
-| Seoul station configuration | `configs/Seoul.json` |
-| Tokyo/RJTT training notebook | `stations/Tokyo/train_Tokyo.ipynb` |
-| Tokyo station configuration | `configs/Tokyo.json` |
-| Notebook structure and artifact contract | `NOTEBOOK_STANDARD.md` |
-| New-station and retraining procedure | `SOP.md` |
-| Required context for all notebook work and current-pipeline research procedure | `RESEARCH_NOTEBOOK_GUIDE.md` |
-| Full pipeline, Celsius/Fahrenheit, bucket, and 3% missingness guide | `TEMPERATURE_UNITS_AND_BUCKETS.md` |
-| Ordinal Model 2 contract | `ORDINAL_MODEL_2.md` |
-| Immutable release provenance gate | `RELEASE_PROVENANCE.md` |
-| Live point-model notebook lineage | `LIVE_MODEL_NOTEBOOK_LINEAGE.md` |
-| KDAL/Tokyo research-production parity audit (2026-08-11) | `KDAL_TOKYO_RESEARCH_PRODUCTION_PARITY_AUDIT_2026-08-11.md` |
-| Notebook generator | `generate_station_notebook.py` |
+The shared implementation is:
 
-KDAL is the reference implementation for the Dallas probability challenger.
-Seoul and Tokyo are the reference implementations for the Asia 11 AM no-peak
-profile. Every station notebook contains, in order:
+- `src/calibration/station_baseline.py`: point-training and artifact orchestration;
+- `src/calibration/station_probability_models.py`: Gaussian and ordinal models;
+- `generate_station_notebook.py`: deterministic station-code notebooks.
 
-1. the station-specific V20 no-peak point-model training workflow;
-2. XGBoost, LightGBM, and CatBoost base forecasts;
-3. the Ridge stack and chronological point-model evaluation;
-4. station-market probability training (**Ordinal Probabilities Model 2** for
-   KDAL; the native whole-1°C ordinal model for Seoul/Tokyo);
-5. chronological probability evaluation;
-6. exploratory 2026 holdout scoring;
-7. pure-ordinal model-weight export;
-8. any enabled station-specific challenger; and
-9. its predictions, comparisons, model weights, and manifests.
+## Model contract
 
-The probability model is intentionally in the same notebook as the station
-training workflow. It is not a detached post-processing notebook.
+1. Build the point-in-time station feature frame at 11 AM local.
+2. Tune one XGBoost regressor with 100 Optuna trials using
+   `TPESampler(n_startup_trials=40)`.
+3. Produce chronological XGBoost point predictions.
+4. Fit a conditional Gaussian residual probability baseline.
+5. Fit native-reference, blended, shared-slope, and pure ordinal candidates.
+6. Require all blended/shared-slope/pure artifacts and evaluate their
+   station-specific two-of-three confidence vote.
+7. Aggregate selected-bucket probability with the median of those three voting
+   members; the native reference remains non-voting.
+8. Compare candidates and ensembles on market-bucket log loss, Brier score,
+   calibration, agreement, gate coverage, and top-bucket accuracy.
+9. Export frozen evaluation artifacts and separately named live-production
+   candidates.
 
-## Active versus historical work
+No LightGBM, CatBoost, Ridge stack, or other point ensemble is part of this
+baseline. Every probability candidate depends only on chronological XGBoost
+point predictions.
 
-All `station_stacking_v*` directories are preserved in place as historical
-research. They are inputs and evidence, not the starting point for a new
-station. No historical notebook has been deleted or moved because existing
-notebooks and scripts may reference those paths.
-
-For new station work, copy a station configuration and generate a new notebook
-under `stations/{STATION}/`. Station-specific providers, feature builders,
-timing, labels, and source notebook builders must remain station-specific.
-
-Generate KDAL:
+## Generate notebooks
 
 ```powershell
-python notebooks\station_training_baseline\generate_station_notebook.py `
-  --config notebooks\station_training_baseline\configs\KDAL.json
+python notebooks\station_training_baseline\generate_station_notebook.py --all
 ```
 
-Generate Seoul and Tokyo:
+Run one notebook with:
 
 ```powershell
-python notebooks\station_training_baseline\generate_station_notebook.py `
-  --config notebooks\station_training_baseline\configs\Seoul.json
-
-python notebooks\station_training_baseline\generate_station_notebook.py `
-  --config notebooks\station_training_baseline\configs\Tokyo.json
+python scripts\execute_notebook_cells.py `
+  notebooks\station_training_baseline\stations\RJTT\train_RJTT.ipynb
 ```
 
-Generated model artifacts go to:
+Generated data remains under
+`data/calibration/station_training_baseline/{STATION}/` and is not source of
+truth. Production-candidate artifacts from a dirty worktree remain unapproved;
+they require a separate clean-commit promotion review before deployment.
 
-```text
-data/calibration/station_training_baseline/{STATION}/
-```
-
-The ordinal artifact remains research/shadow-only until it passes fresh,
-station-specific promotion evidence.
-
-Seoul and Tokyo use the `asia_no_peak` probability profile: GFS, GEFS, and JMA
-MSM at the local 11 AM cutoff. Their honest point-stack probability history is
-2024–2025, with 2025 as forward validation and 2026 as exploratory holdout.
-Seoul and Tokyo probability targets and exported market distributions are
-native whole degrees Celsius; their historical rounded-Fahrenheit/2°F artifacts
-are retained only for comparison.
-
-## Integrated KDAL probability challenger
-
-The KDAL notebook now runs the ordinal challenger after the pure probability
-baseline and exports exactly three roles: blended ordinal, shared-slope ordinal,
-and pure ordinal. The shared implementation and research notes are documented at
-`notebooks/experiments/kdal_ordinal_challenger_v1/README.md`. None of these arms can
-override the V20 point bucket.
+Each run also writes `{STATION}_trading_backtest_input.csv`, containing the
+per-family market distributions, point/top buckets, ensemble votes, and
+approval state. The trading engine joins this file to historical market mids;
+the training notebook does not invent prices or calculate P&L without that
+external market history.

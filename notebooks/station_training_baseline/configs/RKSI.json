@@ -1,0 +1,55 @@
+{
+  "station_id": "RKSI",
+  "station_name": "Seoul Incheon International Airport",
+  "city_id": "seoul",
+  "notebook_path": "stations/RKSI/train_RKSI.ipynb",
+  "feature_builder": "asia_11am",
+  "timezone": "Asia/Seoul",
+  "providers": ["gfs", "gefs", "jma_msm"],
+  "feature_version": "v20_asia_no_peak",
+  "timing_mode": "asia_same_day_11am_live_safe",
+  "target_mode": "remaining_warmup",
+  "target_source": "wunderground_only",
+  "observation_source": "iem_asos_global_metar",
+  "hyperparameter_space": "wide",
+  "max_feature_missing_fraction": 0.03,
+  "optuna_trials": 100,
+  "optuna_startup_trials": 40,
+  "point_nested_chronological_oos": true,
+  "optuna_verbose": false,
+  "year_split_folds": [
+    {"name": "fold_2022_to_2023", "train_start_year": 2022, "train_end_year": 2022, "validation_year": 2023},
+    {"name": "fold_2022_2023_to_2024", "train_start_year": 2022, "train_end_year": 2023, "validation_year": 2024},
+    {"name": "fold_2022_2024_to_2025", "train_start_year": 2022, "train_end_year": 2024, "validation_year": 2025}
+  ],
+  "point_evaluation_train_years": [2022, 2025],
+  "point_test_year": 2026,
+  "point_bucket_contract": "polymarket_half_up_1c",
+  "probability_unit": "C",
+  "market_bucket_width": 1,
+  "ordinal_tail_offset": 3,
+  "probability_development_years": [2024, 2025],
+  "probability_validation_years": [2025],
+  "point_evaluation_model_version": "station_high_regressor_baseline_new_rksi_xgboost",
+  "point_production_model_version": "station_high_regressor_live_rksi_xgboost_2026_candidate",
+  "gaussian_evaluation_model_version": "station_probability_baseline_new_rksi_gaussian_residual",
+  "gaussian_production_model_version": "station_probability_live_rksi_gaussian_residual_2026_candidate",
+  "ordinal_candidate_model_versions": {
+    "native_ordinal_reference": {
+      "evaluation": "station_probability_baseline_new_rksi_native_ordinal_reference",
+      "production": "station_probability_live_rksi_native_ordinal_reference_2026_candidate"
+    },
+    "blended_ordinal": {
+      "evaluation": "station_probability_baseline_new_rksi_blended_ordinal",
+      "production": "station_probability_live_rksi_blended_ordinal_2026_candidate"
+    },
+    "shared_slope_ordinal": {
+      "evaluation": "station_probability_baseline_new_rksi_shared_slope_ordinal",
+      "production": "station_probability_live_rksi_shared_slope_ordinal_2026_candidate"
+    },
+    "pure_ordinal": {
+      "evaluation": "station_probability_baseline_new_rksi_pure_ordinal",
+      "production": "station_probability_live_rksi_pure_ordinal_2026_candidate"
+    }
+  }
+}

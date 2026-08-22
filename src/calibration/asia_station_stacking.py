@@ -37,6 +37,15 @@ ASIA_START_YEAR = 2022
 ASIA_TEST_YEAR = 2026
 ASIA_TIMING_MODE = "asia_same_day_11am_live_safe"
 CITY_METADATA: dict[str, dict[str, Any]] = {
+    "busan": {
+        "station_id": "RKPK",
+        "city_label": "Busan",
+        "station_name": "Gimhae International Airport",
+        "timezone": "Asia/Seoul",
+        "country": "KR",
+        "lat": 35.1795,
+        "lon": 128.9382,
+    },
     "tokyo": {
         "station_id": "RJTT",
         "city_label": "Tokyo",
@@ -278,10 +287,18 @@ def build_asia_station_wide_dataset(
         )
         settlements["actual_high_c"] = settlements["settlement_high_c"]
         settlements["actual_high_c_source"] = "settlement_high_c"
+        settlements["settlement_high_c_source"] = settlements.get(
+            "settlement_source", "wunderground_station_history"
+        )
+        settlements["actual_high_c_settlement_source"] = settlements[
+            "settlement_high_c_source"
+        ]
         native_celsius_columns = [
             "actual_high_c",
             "settlement_high_c",
             "actual_high_c_source",
+            "actual_high_c_settlement_source",
+            "settlement_high_c_source",
         ]
     settlements["target_source"] = "wunderground_only"
     settlements["actual_source"] = settlements.get("settlement_source", "wunderground_station_history")

@@ -30,7 +30,7 @@ from src.asia_11am import (  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Resumable Seoul/Tokyo 11AM GFS + GEFS + JMA MSM pull pipeline"
+        description="Resumable Asia 11AM GFS + GEFS + JMA MSM pull pipeline"
     )
     parser.add_argument(
         "stage",
@@ -82,6 +82,7 @@ def main() -> None:
                 end_date,
                 api_key=args.api_key,
                 force=args.force,
+                workers=max(1, args.workers),
             )
         elif args.stage == "observations":
             result = run_observation_backfill(

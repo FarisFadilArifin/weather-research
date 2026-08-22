@@ -17,10 +17,19 @@ All temperature outputs are in Fahrenheit.
 
 The project has two model tracks:
 
-- Station-stacking v2 ML: `xgboost`, `lightgbm`, and `catboost` base models with a `ridge_stack` meta-model. This is the main deployment direction for predicting `actual_high_f` directly from GFS, HRRR, current observations, calendar features, lagged history, and v2 notebook-engineered features.
+- Canonical station baseline: one XGBoost point model with a conditional-Gaussian
+  benchmark, four ordinal research candidates, and a canonical two-of-three
+  ordinal ensemble. KDAL, RJTT, RKSI, and RKPK use station-specific provider,
+  native-unit, tail, and market-bucket contracts.
+- Historical station-stacking experiments: XGBoost, LightGBM, CatBoost, and
+  Ridge-stack variants preserved under `notebooks/experiments/`.
 - Bias-calibration benchmark: `hierarchical_shrinkage`, a walk-forward historical bias calibration rule. This is the safer recommendation in the current generated calibration report.
 
-For UI context, describe the project as using station-stacking v2 with XGBoost, LightGBM, CatBoost, and a Ridge stack. Hierarchical shrinkage remains a conservative calibration benchmark for the older additive-bias path.
+For UI context, describe the canonical research baseline as single-XGBoost with
+a Gaussian benchmark and four ordinal candidates; blended, shared-slope, and
+pure ordinal form the canonical ensemble while the native reference remains
+non-voting. Hierarchical shrinkage remains a conservative benchmark for the
+older additive-bias path.
 
 ## Conservative Calibration Rule
 

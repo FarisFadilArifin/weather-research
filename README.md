@@ -1,6 +1,10 @@
 # Weather Forecast Calibration Research
 
-Python research pipeline for daily high-temperature forecast markets. The current deployment direction is a same-day 11 AM station-stacking v2 workflow that combines GFS, HRRR, current station observations, calendar features, lagged history, and notebook-v2 engineered features.
+Python research pipeline for daily high-temperature forecast markets. The
+canonical research baseline is a same-day local-11-AM workflow with one
+XGBoost point model per station, a conditional-Gaussian benchmark, four
+ordinal research candidates, and a canonical three-member ordinal ensemble.
+Historical stacking experiments remain preserved under `notebooks/experiments/`.
 
 New collaborators should start with
 [QUICKSTART.md](docs/getting-started/QUICKSTART.md). The active
@@ -36,12 +40,19 @@ The main research workflow is:
 - Target forecast: max forecast temperature over that remaining-day window
 - Target variable: final observed station high, `actual_high_f`
 
-Primary station-stacking v2 models:
+Canonical station-baseline point model:
 
-- `xgboost`
-- `lightgbm`
-- `catboost`
-- `ridge_stack` meta-model as the final stacked prediction
+- `xgboost`, tuned with 100 Optuna trials and 40 TPE startup trials.
+
+Canonical probability layer:
+
+- conditional Gaussian residual benchmark;
+- native ordinal reference;
+- blended cumulative ordinal;
+- compact shared-slope ordinal;
+- pure cumulative ordinal;
+- station-specific two-of-three confidence voting and median selected-bucket
+  aggregation over blended/shared-slope/pure.
 
 The older `0h` / 06:00 local calibration report path still exists as a conservative benchmark, especially for `hierarchical_shrinkage`, but it is not the current main station-stacking direction.
 

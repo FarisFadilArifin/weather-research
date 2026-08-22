@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -121,6 +122,38 @@ def test_station_stacking_config_accepts_mae_optuna_metric() -> None:
     assert StationStackingConfig(station_id="KATL", optuna_metric="bucket").effective_optuna_metric == "bucket_log_loss"
     with pytest.raises(ValueError, match="optuna_metric"):
         StationStackingConfig(station_id="KATL", optuna_metric="mape").effective_optuna_metric
+
+
+def test_nested_chronological_config_is_baseline_opt_in() -> None:
+    config = StationStackingConfig(station_id="KATL", nested_chronological_oos=True)
+    assert config.nested_chronological_oos is True
+    assert "nested_outer_2025" in station_stacking._optuna_study_name(
+        dataclasses.replace(config, optuna_study_suffix="_nested_outer_2025"), stage="base", method="xgboost"
+    )
+
+
+def test_nested_outer_fold_excludes_its_target_and_omits_earliest(monkeypatch) -> None:
+    class Trial:
+        number = 0
+        def set_user_attr(self, *args, **kwargs): pass
+    class Study:
+        def optimize(self, objective, **kwargs): objective(Trial())
+        def get_trials(self, **kwargs): return []
+    calls = []
+    def fit(*, train, valid, **kwargs):
+        calls.append((set(train.year), set(valid.year)))
+        return [float(train.actual_high_f.mean())] * len(valid), {"numeric_features": "x", "categorical_features": "", "best_iteration": None}
+    monkeypatch.setattr(station_stacking, "_create_optuna_study", lambda *args: Study())
+    monkeypatch.setattr(station_stacking, "_remaining_optuna_trials", lambda *args: 1)
+    monkeypatch.setattr(station_stacking, "_suggest_hyperparameters", lambda *args: {"x": 1})
+    monkeypatch.setattr(station_stacking, "_fit_predict_base_model", fit)
+    frame = pd.DataFrame({"contract_date": pd.to_datetime(["2021-01-01", "2022-01-01", "2023-01-01"]), "year": [2021, 2022, 2023], "actual_high_f": [1., 2., 3.], "x": [1., 2., 3.]})
+    folds = (station_stacking.YearSplitFold("first", 2021, 2021, 2022), station_stacking.YearSplitFold("outer", 2021, 2022, 2023))
+    config = StationStackingConfig(station_id="KATL", base_model_methods=("xgboost",), optuna_trials=1, optuna_metric="mae", nested_chronological_oos=True)
+    _, predictions, selected = station_stacking._nested_chronological_year_split_base_models(frame, config, [], ["x"], folds)
+    assert predictions.fold.unique().tolist() == ["outer"]
+    assert selected.selection_max_validation_year.tolist() == [2022]
+    assert all(max(train) < min(valid) for train, valid in calls)
 
 
 def test_station_stacking_config_catboost_caps() -> None:
@@ -3315,7 +3348,7 @@ def test_export_v18_manifest_records_ridge_stack_bucket_policy_and_wunderground_
     assert manifest["model_contract"]["training_profile"] == "legacy"
     assert manifest["model_contract"]["optuna_metric"] == "mae_f"
     assert manifest["training_validation"]["training_profile"] == "legacy"
-    assert manifest["training_validation"]["base_fold_policy"] == "configured_legacy_folds"
+    assert manifest["training_validation"]["base_fold_policy"] == "2_chronological_folds_2024_2025_configured_weights"
     assert manifest["training_validation"]["stack_validation_mode"] == "single_latest_meta_year"
     assert manifest["training_validation"]["selected_ridge_trial"] == "stack_low_mae"
     assert manifest["stack_model"]["param_key"] == "stack_low_mae"
